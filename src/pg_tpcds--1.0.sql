@@ -9,17 +9,10 @@ CREATE FUNCTION dbgen(sf INT, max_rows INT DEFAULT -1) RETURNS TABLE(tab TEXT, r
 DECLARE
     rec RECORD;
 BEGIN
-    FOR rec IN SELECT table_name, status, child FROM tpch.tpch_tables LOOP
-        -- skip child tables
-        IF rec.status <> 1 THEN
-            row_count := dbgen_internal(sf, rec.table_name, max_rows);
-            tab := rec.table_name;
-            RETURN NEXT;
-            IF rec.status = 2 THEN
-                tab := rec.child;
-                RETURN NEXT;
-            END IF;
-        END IF;
+    FOR rec IN SELECT table_name FROM tpch.tpch_tables LOOP
+        row_count := dbgen_internal(sf, rec.table_name, max_rows);
+        tab := rec.table_name;
+        RETURN NEXT;
     END LOOP;
 END;
 $$ LANGUAGE plpgsql;
@@ -100,7 +93,7 @@ DECLARE
 BEGIN
     IF query_count = 1 AND queries[1] = 0 THEN
         run_all := true;
-        query_count := 99;
+        query_count := 22;
     END IF;
 
     FOR i IN 1..query_count LOOP
@@ -141,11 +134,6 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE VIEW tpch AS
-SELECT
-  *
-FROM
-  tpch();
+CREATE VIEW tpch AS SELECT * FROM tpch();
 
-SELECT
-  tpch_prepare();
+SELECT tpch_prepare();

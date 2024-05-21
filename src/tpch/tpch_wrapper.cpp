@@ -128,7 +128,7 @@ tpch_runner_result *TPCHWrapper::RunTPCH(int qid) {
     throw std::runtime_error(std::format("Queries file for qid: {} does not exist", qid));
 }
 
-int TPCHWrapper::DSDGen(int scale, char *table, int max_row) {
+int TPCHWrapper::DBGen(int scale, char *table, int max_row) {
   const std::filesystem::path extension_dir = get_extension_external_directory();
   TPCHTableGenerator generator(scale, table, max_row, extension_dir);
 
@@ -140,37 +140,19 @@ int TPCHWrapper::DSDGen(int scale, char *table, int max_row) {
   if (std::string{table} == #tbl) \
     throw std::runtime_error(std::format("Table {} is a child; it is populated during the build of its parent", #tbl));
 
-  CASE(call_center)
-  CASE(catalog_page)
-  CASE(customer_address)
   CASE(customer)
-  CASE(customer_demographics)
-  CASE(date_dim)
-  CASE(household_demographics)
-  CASE(income_band)
-  CASE(inventory)
-  CASE(item)
-  CASE(promotion)
-  CASE(reason)
-  CASE(ship_mode)
-  CASE(store)
-  CASE(time_dim)
-  CASE(warehouse)
-  CASE(web_page)
-  CASE(web_site)
+  CASE(nation)
+  CASE(region)
+  CASE(supplier)
 
-  CASE_ERROR(catalog_returns)
-  CASE_ERROR(store_returns)
-  CASE_ERROR(web_returns)
+  CASE_ERROR(lineitem)
+  CASE_ERROR(partsupp)
 
-  if (std::string{table} == "catalog_sales")
-    return generator.generate_catalog_sales_and_returns();
+  if (std::string{table} == "orders")
+    return generator.generate_orders_and_lineitem();
 
-  if (std::string{table} == "store_sales")
-    return generator.generate_store_sales_and_returns();
-
-  if (std::string{table} == "web_sales")
-    return generator.generate_web_sales_and_returns();
+  if (std::string{table} == "part")
+    return generator.generate_part_and_partsupp();
 
 #undef CASE_ERROR
 #undef CASE

@@ -1,6 +1,6 @@
 
 cmake_minimum_required(VERSION 3.20.0)
-project(pg_tpcds VERSION
+project(pg_tpch VERSION
   1.0.0
   LANGUAGES CXX C)
 

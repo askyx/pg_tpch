@@ -14,7 +14,7 @@ struct tpch_runner_result {
 };
 
 struct TPCHWrapper {
-  static int DSDGen(int scale, char* table, int max_row);
+  static int DBGen(int scale, char* table, int max_row);
 
   static uint32_t QueriesCount();
   static const char* GetQuery(int query);
