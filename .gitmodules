@@ -1,0 +1,3 @@
+[submodule "src/tpch/tpch-dbgen"]
+	path = src/tpch/tpch-dbgen
+	url = https://github.com/askyx/tpch-dbgen.git

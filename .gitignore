@@ -1,0 +1,35 @@
+build/
+
+# Object files
+*.o
+
+# Libraries
+*.lib
+*.a
+
+# Shared objects (inc. Windows DLLs)
+*.dll
+*.so
+*.so.*
+*.dylib
+
+# Executables
+*.exe
+*.out
+*.app
+
+# Generated files
+tables.h
+streams.h
+columns.h
+y.tab.h
+y.tab.c
+y.output
+tokenizer.c
+checksum
+.ctags_updated
+tags
+
+# Flat files
+*.dat
+.vscode
