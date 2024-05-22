@@ -31,6 +31,7 @@ cmake --build build --target install
     - overwrite (default false), if it is true, before generate data set, do truncate TPCH table first and run stats
   * desc
     - generate data set for tpch, according to scale factor, and load it into tables
+    - data set has checed with duckdb
     - TODO: async data generation
 
 * tpch

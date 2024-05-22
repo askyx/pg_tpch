@@ -134,6 +134,20 @@ class TableLoader {
     return *this;
   }
 
+  auto& addItem(const std::string& value) {
+    curr_cid_++;
+
+    std::string pos;
+    if (curr_cid_ < col_size_)
+      pos = ",";
+    else
+      pos = "";
+
+    sql += std::format("{}{}", value, pos);
+
+    return *this;
+  }
+
   template <typename T>
     requires(std::is_trivial_v<T>)
   auto& addItem(T value) {
@@ -175,10 +189,9 @@ class TableLoader {
   size_t row_count_ = 0;
 };
 
-float convert_money(DSS_HUGE cents) {
-  const auto dollars = cents / 100;
-  cents %= 100;
-  return static_cast<float>(dollars) + (static_cast<float>(cents)) / 100.0f;
+/* convert by databse, this is  cents / (100::numeric(15,2)) */
+std::string convert_money(DSS_HUGE cents) {
+  return std::format("{}/100::numeric(15,2)", cents);
 }
 
 int TPCHTableGenerator::generate_customer() {
