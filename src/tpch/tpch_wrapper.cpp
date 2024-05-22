@@ -128,13 +128,13 @@ tpch_runner_result *TPCHWrapper::RunTPCH(int qid) {
     throw std::runtime_error(std::format("Queries file for qid: {} does not exist", qid));
 }
 
-int TPCHWrapper::DBGen(int scale, char *table, int max_row) {
+std::pair<int, int> TPCHWrapper::DBGen(double scale, char *table) {
   const std::filesystem::path extension_dir = get_extension_external_directory();
-  TPCHTableGenerator generator(scale, table, max_row, extension_dir);
+  TPCHTableGenerator generator(scale, table, extension_dir);
 
 #define CASE(tbl)                 \
   if (std::string{table} == #tbl) \
-    return generator.generate_##tbl();
+    return {generator.generate_##tbl(), 0};
 
 #define CASE_ERROR(tbl)           \
   if (std::string{table} == #tbl) \

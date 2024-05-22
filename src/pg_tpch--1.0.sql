@@ -1,32 +1,15 @@
 CREATE FUNCTION dbgen_internal(
-  IN sf INT,
+  IN sf DOUBLE PRECISION,
   IN gentable TEXT,
-  IN max_rows int DEFAULT -1
-) RETURNS INT AS 'MODULE_PATHNAME',
+  OUT t1_count INT,
+  OUT t2_count INT
+) RETURNS record AS 'MODULE_PATHNAME',
 'dbgen_internal' LANGUAGE C IMMUTABLE STRICT;
-
-CREATE FUNCTION dbgen(sf INT, max_rows INT DEFAULT -1) RETURNS TABLE(tab TEXT, row_count INT) AS $$
-DECLARE
-    rec RECORD;
-BEGIN
-    FOR rec IN SELECT table_name, status, child FROM tpch.tpch_tables LOOP
-        IF rec.status <> 1 THEN
-            row_count := dbgen_internal(sf, rec.table_name, max_rows);
-            tab := rec.table_name;
-            RETURN NEXT;
-            IF rec.status = 2 THEN
-                tab := rec.child;
-                RETURN NEXT;
-            END IF;
-        END IF;
-    END LOOP;
-END;
-$$ LANGUAGE plpgsql;
 
 CREATE FUNCTION tpch_prepare() RETURNS BOOLEAN AS 'MODULE_PATHNAME',
 'tpch_prepare' LANGUAGE C IMMUTABLE STRICT;
 
-CREATE FUNCTION tpch_cleanup() RETURNS BOOLEAN AS $$
+CREATE FUNCTION tpch_cleanup(clean_stats BOOLEAN DEFAULT FALSE) RETURNS BOOLEAN AS $$
 DECLARE
     tbl TEXT;
 BEGIN
@@ -36,7 +19,37 @@ BEGIN
     LOOP
         EXECUTE 'truncate ' || tbl;
     END LOOP;
+
+    IF clean_stats THEN
+        DELETE FROM tpch.tpch_query_stats;
+    END IF;
+
     RETURN TRUE;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE FUNCTION dbgen(sf DOUBLE PRECISION, overwrite BOOLEAN DEFAULT FALSE) RETURNS TABLE(tab TEXT, row_count INT) AS $$
+DECLARE
+    rec RECORD;
+    r_count RECORD;
+BEGIN
+    IF overwrite THEN
+        SELECT tpch_cleanup(true);
+    END IF;
+
+    FOR rec IN SELECT table_name, status, child FROM tpch.tpch_tables LOOP
+        IF rec.status <> 1 THEN
+            SELECT t1_count, t2_count INTO r_count FROM dbgen_internal(sf, rec.table_name);
+            tab := rec.table_name;
+            row_count := r_count.t1_count;
+            RETURN NEXT;
+            IF rec.status = 2 THEN
+                tab := rec.child;
+                row_count := r_count.t2_count;
+                RETURN NEXT;
+            END IF;
+        END IF;
+    END LOOP;
 END;
 $$ LANGUAGE plpgsql;
 
@@ -82,7 +95,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE FUNCTION tpch(VARIADIC queries INT [] DEFAULT '{0}' :: INT []) RETURNS TABLE (
+CREATE FUNCTION tpch(VARIADIC queries INT [] DEFAULT '{0}'::INT []) RETURNS TABLE (
   "Qid" CHAR(2),
   "Stable(ms)" TEXT,
   "Current(ms)" TEXT,

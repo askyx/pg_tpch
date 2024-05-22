@@ -57,9 +57,9 @@ DSSType call_dbgen_mk(size_t idx, MKRetType (*mk_fn)(DSS_HUGE, DSSType* val, DBG
   return value;
 }
 
-TPCHTableGenerator::TPCHTableGenerator(uint32_t scale_factor, const std::string& table, int max_row,
+TPCHTableGenerator::TPCHTableGenerator(double scale_factor, const std::string& table,
                                        std::filesystem::path resource_dir, int rng_seed)
-    : table_{std::move(table)}, _scale_factor{scale_factor}, max_row_{max_row} {
+    : table_{std::move(table)} {
   // atexit([]() { throw std::runtime_error("TPCHTableGenerator internal error"); });
   tdef* tdefs = ctx_.tdefs;
   tdefs[PART].base = 200000;
@@ -73,12 +73,12 @@ TPCHTableGenerator::TPCHTableGenerator(uint32_t scale_factor, const std::string&
   tdefs[NATION].base = NATIONS_MAX;
   tdefs[REGION].base = NATIONS_MAX;
 
-  if (_scale_factor < MIN_SCALE) {
+  if (scale_factor < MIN_SCALE) {
     int i;
     int int_scale;
 
     ctx_.scale_factor = 1;
-    int_scale = (int)(1000 * _scale_factor);
+    int_scale = (int)(1000 * scale_factor);
     for (i = PART; i < REGION; i++) {
       tdefs[i].base = (DSS_HUGE)(int_scale * tdefs[i].base) / 1000;
       if (ctx_.tdefs[i].base < 1) {
@@ -86,7 +86,7 @@ TPCHTableGenerator::TPCHTableGenerator(uint32_t scale_factor, const std::string&
       }
     }
   } else {
-    ctx_.scale_factor = (long)_scale_factor;
+    ctx_.scale_factor = (long)scale_factor;
   }
   load_dists(10 * 1024 * 1024, &ctx_);  // 10MiB
   tdefs[NATION].base = nations.count;
@@ -204,7 +204,7 @@ int TPCHTableGenerator::generate_customer() {
   return loader.row_count();
 }
 
-int TPCHTableGenerator::generate_orders_and_lineitem() {
+std::pair<int, int> TPCHTableGenerator::generate_orders_and_lineitem() {
   const auto order_count = static_cast<size_t>(ctx_.tdefs[ORDER].base * ctx_.scale_factor);
 
   TableLoader order_loader("orders", 9, 100);
@@ -249,7 +249,7 @@ int TPCHTableGenerator::generate_orders_and_lineitem() {
     }
   }
 
-  return std::max(order_loader.row_count(), lineitem_loader.row_count());
+  return {order_loader.row_count(), lineitem_loader.row_count()};
 }
 
 int TPCHTableGenerator::generate_nation() {
@@ -265,7 +265,7 @@ int TPCHTableGenerator::generate_nation() {
   return loader.row_count();
 }
 
-int TPCHTableGenerator::generate_part_and_partsupp() {
+std::pair<int, int> TPCHTableGenerator::generate_part_and_partsupp() {
   const auto part_count = static_cast<size_t>(ctx_.tdefs[PART].base * ctx_.scale_factor);
 
   TableLoader part_loader("part", 9, 100);
@@ -297,7 +297,7 @@ int TPCHTableGenerator::generate_part_and_partsupp() {
     }
   }
 
-  return std::max(part_loader.row_count(), partsupp_loader.row_count());
+  return {part_loader.row_count(), partsupp_loader.row_count()};
 }
 
 int TPCHTableGenerator::generate_region() {

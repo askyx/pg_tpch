@@ -38,9 +38,11 @@ static int tpch_num_queries() {
   return tpch::TPCHWrapper::QueriesCount();
 }
 
-static int dbgen_internal(int scale_factor, char* table, int max_row) {
+static void dbgen_internal(double scale_factor, char* table, int* count1, int* count2) {
   try {
-    return tpch::TPCHWrapper::DBGen(scale_factor, table, max_row);
+    auto count = tpch::TPCHWrapper::DBGen(scale_factor, table);
+    *count1 = count.first;
+    *count2 = count.second;
   } catch (const std::exception& e) {
     elog(ERROR, "TPC-DS Failed to dsdgen, get error: %s", e.what());
   }
@@ -123,12 +125,23 @@ Datum tpch_runner(PG_FUNCTION_ARGS) {
 PG_FUNCTION_INFO_V1(dbgen_internal);
 
 Datum dbgen_internal(PG_FUNCTION_ARGS) {
-  int sf = PG_GETARG_INT32(0);
+  double sf = PG_GETARG_FLOAT8(0);
   char* table = text_to_cstring(PG_GETARG_TEXT_PP(1));
-  int max_row = PG_GETARG_INT32(2);
+  int count1 = 0;
+  int count2 = 0;
 
-  int row_count = tpch::dbgen_internal(sf, table, max_row);
+  TupleDesc tupdesc;
+  Datum values[2];
+  bool nulls[2] = {false, false};
 
-  PG_RETURN_INT32(row_count);
+  if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+    elog(ERROR, "return type must be a row type");
+
+  tpch::dbgen_internal(sf, table, &count1, &count2);
+
+  values[0] = count1;
+  values[1] = count2;
+
+  PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
 }
 }
