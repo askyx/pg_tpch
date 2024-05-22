@@ -1,5 +1,3 @@
-#include "tpch_dsdgen.h"
-
 #include <algorithm>
 #include <climits>
 #include <cstddef>
@@ -15,6 +13,12 @@
 #include <utility>
 #include <vector>
 
+#define DECLARER
+
+#include "dbgen_gunk.hpp"
+#include "tpch_constants.hpp"
+#include "tpch_dsdgen.h"
+
 extern "C" {
 #include <postgres.h>
 
@@ -23,11 +27,10 @@ extern "C" {
 #include <libpq/pqformat.h>
 #include <miscadmin.h>
 #include <utils/builtins.h>
+}
 
 #include "dss.h"
 #include "dsstypes.h"
-#include "tpch_dbgen.h"
-}
 
 namespace tpch {
 
@@ -36,19 +39,20 @@ const std::unordered_map<TPCHTable, std::underlying_type_t<TPCHTable>> tpch_tabl
     {TPCHTable::Orders, ORDER}, {TPCHTable::LineItem, LINE},  {TPCHTable::Nation, NATION}, {TPCHTable::Region, REGION}};
 
 template <typename DSSType, typename MKRetType, typename... Args>
-DSSType call_dbgen_mk(size_t idx, MKRetType (*mk_fn)(DSS_HUGE, DSSType* val, Args...), TPCHTable table, Args... args) {
+DSSType call_dbgen_mk(size_t idx, MKRetType (*mk_fn)(DSS_HUGE, DSSType* val, DBGenContext* ctx, Args...),
+                      TPCHTable table, DBGenContext* ctx, Args... args) {
   /**
    * Preserve calling scheme (row_start(); mk...(); row_stop(); as in dbgen's gen_tbl())
    */
 
   const auto dbgen_table_id = tpch_table_to_dbgen_id.at(table);
 
-  row_start(dbgen_table_id);
+  row_start(dbgen_table_id, ctx);
 
   DSSType value{};
-  mk_fn(idx, &value, std::forward<Args>(args)...);
+  mk_fn(idx, &value, ctx, std::forward<Args>(args)...);
 
-  row_stop(dbgen_table_id);
+  row_stop_h(dbgen_table_id, ctx);
 
   return value;
 }
@@ -56,9 +60,41 @@ DSSType call_dbgen_mk(size_t idx, MKRetType (*mk_fn)(DSS_HUGE, DSSType* val, Arg
 TPCHTableGenerator::TPCHTableGenerator(uint32_t scale_factor, const std::string& table, int max_row,
                                        std::filesystem::path resource_dir, int rng_seed)
     : table_{std::move(table)}, _scale_factor{scale_factor}, max_row_{max_row} {
-  dbgen_reset_seeds();
-  dbgen_init_scale_factor(_scale_factor);
   // atexit([]() { throw std::runtime_error("TPCHTableGenerator internal error"); });
+  tdef* tdefs = ctx_.tdefs;
+  tdefs[PART].base = 200000;
+  tdefs[PSUPP].base = 200000;
+  tdefs[SUPP].base = 10000;
+  tdefs[CUST].base = 150000;
+  tdefs[ORDER].base = 150000 * ORDERS_PER_CUST;
+  tdefs[LINE].base = 150000 * ORDERS_PER_CUST;
+  tdefs[ORDER_LINE].base = 150000 * ORDERS_PER_CUST;
+  tdefs[PART_PSUPP].base = 200000;
+  tdefs[NATION].base = NATIONS_MAX;
+  tdefs[REGION].base = NATIONS_MAX;
+
+  if (_scale_factor < MIN_SCALE) {
+    int i;
+    int int_scale;
+
+    ctx_.scale_factor = 1;
+    int_scale = (int)(1000 * _scale_factor);
+    for (i = PART; i < REGION; i++) {
+      tdefs[i].base = (DSS_HUGE)(int_scale * tdefs[i].base) / 1000;
+      if (ctx_.tdefs[i].base < 1) {
+        tdefs[i].base = 1;
+      }
+    }
+  } else {
+    ctx_.scale_factor = (long)_scale_factor;
+  }
+  load_dists(10 * 1024 * 1024, &ctx_);  // 10MiB
+  tdefs[NATION].base = nations.count;
+  tdefs[REGION].base = regions.count;
+}
+
+TPCHTableGenerator::~TPCHTableGenerator() {
+  cleanup_dists();
 }
 
 class TableLoader {
@@ -98,28 +134,6 @@ class TableLoader {
     return *this;
   }
 
-  // ugly code
-  template <typename T>
-  auto& addItem(const std::optional<T>& value) {
-    curr_cid_++;
-
-    std::string pos;
-    if (curr_cid_ < col_size_)
-      pos = ",";
-    else
-      pos = "";
-
-    if (value.has_value()) {
-      if constexpr (std::same_as<T, std::string>)
-        sql += std::format("'{}'{}", value.value(), pos);
-      else
-        sql += std::format("{}{}", value.value(), pos);
-    } else
-      sql += std::format("null{}", pos);
-
-    return *this;
-  }
-
   template <typename T>
     requires(std::is_trivial_v<T>)
   auto& addItem(T value) {
@@ -131,7 +145,8 @@ class TableLoader {
     else
       pos = "";
 
-    if constexpr (std::is_same_v<T, char*>)
+    if constexpr (std::is_same_v<std::remove_cv_t<T>, char*> || std::is_same_v<std::remove_cv_t<T>, const char*> ||
+                  std::is_same_v<std::remove_cv_t<T>, char> || std::is_same_v<std::remove_cv_t<T>, const char>)
       sql += std::format("'{}'{}", value, pos);
     else
       sql += std::format("{}{}", value, pos);
@@ -166,13 +181,13 @@ float convert_money(DSS_HUGE cents) {
   return static_cast<float>(dollars) + (static_cast<float>(cents)) / 100.0f;
 }
 
-int TPCHTableGenerator::generate_customer() const {
-  const auto customer_count = static_cast<uint32_t>(tdefs[CUST].base * scale);
+int TPCHTableGenerator::generate_customer() {
+  const auto customer_count = static_cast<uint32_t>(ctx_.tdefs[CUST].base * ctx_.scale_factor);
 
-  TableLoader loader(table_, 18, 100);
+  TableLoader loader(table_, 8, 100);
 
   for (auto row_idx = size_t{0}; row_idx < customer_count; row_idx++) {
-    auto customer = call_dbgen_mk<customer_t>(row_idx + 1, mk_cust, TPCHTable::Customer);
+    auto customer = call_dbgen_mk<customer_t>(row_idx + 1, mk_cust, TPCHTable::Customer, &ctx_);
 
     loader.start()
         .addItem(customer.custkey)
@@ -189,14 +204,14 @@ int TPCHTableGenerator::generate_customer() const {
   return loader.row_count();
 }
 
-int TPCHTableGenerator::generate_orders_and_lineitem() const {
-  const auto order_count = static_cast<ChunkOffset>(tdefs[ORDER].base * scale);
+int TPCHTableGenerator::generate_orders_and_lineitem() {
+  const auto order_count = static_cast<size_t>(ctx_.tdefs[ORDER].base * ctx_.scale_factor);
 
-  TableLoader order_loader(table_, 18, 100);
-  TableLoader lineitem_loader(table_, 18, 100);
+  TableLoader order_loader("orders", 9, 100);
+  TableLoader lineitem_loader("lineitem", 16, 100);
 
   for (auto order_idx = size_t{0}; order_idx < order_count; ++order_idx) {
-    const auto order = call_dbgen_mk<order_t>(order_idx + 1, mk_order, TPCHTable::Orders, 0l);
+    const auto order = call_dbgen_mk<order_t>(order_idx + 1, mk_order, TPCHTable::Orders, &ctx_, 0l);
 
     order_loader.start()
         .addItem(order.okey)
@@ -237,27 +252,27 @@ int TPCHTableGenerator::generate_orders_and_lineitem() const {
   return std::max(order_loader.row_count(), lineitem_loader.row_count());
 }
 
-int TPCHTableGenerator::generate_nation() const {
-  const auto nation_count = static_cast<ChunkOffset>(tdefs[NATION].base);
+int TPCHTableGenerator::generate_nation() {
+  const auto nation_count = static_cast<size_t>(ctx_.tdefs[NATION].base);
 
-  TableLoader loader(table_, 28, 100);
+  TableLoader loader(table_, 4, 100);
 
   for (auto nation_idx = size_t{0}; nation_idx < nation_count; ++nation_idx) {
-    const auto nation = call_dbgen_mk<code_t>(nation_idx + 1, mk_nation, TPCHTable::Nation);
+    const auto nation = call_dbgen_mk<code_t>(nation_idx + 1, mk_nation, TPCHTable::Nation, &ctx_);
     loader.start().addItem(nation.code).addItem(nation.text).addItem(nation.join).addItem(nation.comment).end();
   }
 
   return loader.row_count();
 }
 
-int TPCHTableGenerator::generate_part_and_partsupp() const {
-  const auto part_count = static_cast<ChunkOffset>(tdefs[PART].base * scale);
+int TPCHTableGenerator::generate_part_and_partsupp() {
+  const auto part_count = static_cast<size_t>(ctx_.tdefs[PART].base * ctx_.scale_factor);
 
-  TableLoader part_loader(table_, 5, 100);
-  TableLoader partsupp_loader(table_, 5, 100);
+  TableLoader part_loader("part", 9, 100);
+  TableLoader partsupp_loader("partsupp", 5, 100);
 
   for (auto part_idx = size_t{0}; part_idx < part_count; ++part_idx) {
-    const auto part = call_dbgen_mk<part_t>(part_idx + 1, mk_part, TPCHTable::Part);
+    const auto part = call_dbgen_mk<part_t>(part_idx + 1, mk_part, TPCHTable::Part, &ctx_);
 
     part_loader.start()
         .addItem(part.partkey)
@@ -271,26 +286,7 @@ int TPCHTableGenerator::generate_part_and_partsupp() const {
         .addItem(part.comment)
         .end();
 
-    // Some scale factors (e.g., 0.05) are not supported by tpch-dbgen as they produce non-unique partkey/suppkey
-    // combinations. The reason is probably somewhere in the magic in PART_SUPP_BRIDGE. As the partkey is
-    // ascending, those are easy to identify:
-
-    DSS_HUGE last_partkey = {};
-    auto suppkeys = std::vector<DSS_HUGE>{};
-
     for (const auto& partsupp : part.s) {
-      {
-        // Make sure we do not generate non-unique combinations (see above)
-        if (partsupp.partkey != last_partkey) {
-          // Assert(partsupp.partkey > last_partkey, "Expected partkey to be generated in ascending order.");
-          last_partkey = partsupp.partkey;
-          suppkeys.clear();
-        }
-        // Assert(std::find(suppkeys.begin(), suppkeys.end(), partsupp.suppkey) == suppkeys.end(),
-        //        "Scale factor unsupported by tpch-dbgen. Consider choosing a \"round\" number.");
-        suppkeys.emplace_back(partsupp.suppkey);
-      }
-
       partsupp_loader.start()
           .addItem(partsupp.partkey)
           .addItem(partsupp.suppkey)
@@ -304,26 +300,26 @@ int TPCHTableGenerator::generate_part_and_partsupp() const {
   return std::max(part_loader.row_count(), partsupp_loader.row_count());
 }
 
-int TPCHTableGenerator::generate_region() const {
-  const auto region_count = static_cast<ChunkOffset>(tdefs[REGION].base);
+int TPCHTableGenerator::generate_region() {
+  const auto region_count = static_cast<size_t>(ctx_.tdefs[REGION].base);
 
   TableLoader loader(table_, 3, 100);
 
   for (auto region_idx = size_t{0}; region_idx < region_count; ++region_idx) {
-    const auto region = call_dbgen_mk<code_t>(region_idx + 1, mk_region, TPCHTable::Region);
+    const auto region = call_dbgen_mk<code_t>(region_idx + 1, mk_region, TPCHTable::Region, &ctx_);
     loader.start().addItem(region.code).addItem(region.text).addItem(region.comment).end();
   }
 
   return loader.row_count();
 }
 
-int TPCHTableGenerator::generate_supplier() const {
-  const auto supplier_count = static_cast<ChunkOffset>(tdefs[SUPP].base * scale);
+int TPCHTableGenerator::generate_supplier() {
+  const auto supplier_count = static_cast<size_t>(ctx_.tdefs[SUPP].base * ctx_.scale_factor);
 
-  TableLoader loader(table_, 4, 100);
+  TableLoader loader(table_, 7, 100);
 
   for (auto supplier_idx = size_t{0}; supplier_idx < supplier_count; ++supplier_idx) {
-    const auto supplier = call_dbgen_mk<supplier_t>(supplier_idx + 1, mk_supp, TPCHTable::Supplier);
+    const auto supplier = call_dbgen_mk<supplier_t>(supplier_idx + 1, mk_supp, TPCHTable::Supplier, &ctx_);
 
     loader.start()
         .addItem(supplier.suppkey)

@@ -7,6 +7,7 @@ add_postgresql_extension(
   SOURCES pg_tpch.cpp
   SCRIPTS pg_tpch--1.0.sql)
 
+message("Building pg_tpch extension ${tpch}")
 target_link_libraries(pg_tpch tpch)
 
 set(TPCH_CURR_DIR ${CMAKE_CURRENT_SOURCE_DIR}/tpch)

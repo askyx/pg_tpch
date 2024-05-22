@@ -8,6 +8,8 @@
 #include <utility>
 #include <vector>
 
+#include "dss.h"
+
 namespace tpch {
 
 enum class TPCHTable { Part, PartSupp, Supplier, Customer, Orders, LineItem, Nation, Region };
@@ -16,17 +18,20 @@ class TPCHTableGenerator {
   TPCHTableGenerator(uint32_t scale_factor, const std::string& table, int max_row, std::filesystem::path resource_dir,
                      int rng_seed = 19620718);
 
-  int generate_customer() const;
-  int generate_orders_and_lineitem() const;
-  int generate_nation() const;
-  int generate_part_and_partsupp() const;
-  int generate_region() const;
-  int generate_supplier() const;
+  ~TPCHTableGenerator();
+
+  int generate_customer();
+  int generate_orders_and_lineitem();
+  int generate_nation();
+  int generate_part_and_partsupp();
+  int generate_region();
+  int generate_supplier();
 
  private:
   uint32_t _scale_factor;
   std::string table_;
   int max_row_;
+  DBGenContext ctx_;
 };
 
 }  // namespace tpch
