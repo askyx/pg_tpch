@@ -75,48 +75,51 @@ create extension pg_tpch;
  supplier |      1000
 (8 rows)
 
+-- analyze tables
+analyze;
+
 -- run all 22 queries, you can get detail result like following,
 [local]:15432 asky@regress=# select * from tpch;
  Qid  | Stable(ms)  | Current(ms) | Diff(%) | Result
 ------+-------------+-------------+---------+--------
-  01  |             |      182.32 |         | true
-  02  |             |       19.02 |         | true
-  03  |             |       47.69 |         | true
-  04  |             |       85.34 |         | true
-  05  |             |       27.71 |         | true
-  06  |             |       28.51 |         | true
-  07  |             |       38.26 |         | true
-  08  |             |       54.74 |         | true
-  09  |             |       80.62 |         | true
-  10  |             |       50.79 |         | true
-  11  |             |       18.29 |         | true
-  12  |             |       62.37 |         | true
-  13  |             |       69.12 |         | true
-  14  |             |       33.77 |         | true
-  15  |             |       61.18 |         | true
-  16  |             |       33.02 |         | true
-  17  |             |    20082.87 |         | true
-  18  |             |      712.46 |         | true
-  19  |             |       45.79 |         | true
-  20  |             |    96022.79 |         | true
-  21  |             |       56.94 |         | true
-  22  |             |       35.35 |         | true
+  01  |     7205.02 |     7304.42 |   +1.38 | true
+  02  |     3387.55 |     3188.97 |   -5.86 | true
+  03  |     2703.25 |     2781.70 |   +2.90 | true
+  04  |      745.93 |      748.44 |   +0.34 | true
+  05  |     1350.80 |     1328.60 |   -1.64 | true
+  06  |      866.87 |      931.66 |   +7.48 | true
+  07  |     1855.41 |     2279.28 |  +22.85 | true
+  08  |     2606.11 |     2588.94 |   -0.66 | true
+  09  |    13436.01 |    12221.57 |   -9.04 | true
+  10  |     2958.73 |     3158.99 |   +6.77 | true
+  11  |      721.30 |     1302.36 |  +80.56 | true
+  12  |     1653.34 |     1763.60 |   +6.67 | true
+  13  |    12294.78 |    15920.73 |  +29.49 | true
+  14  |     1075.40 |     1107.85 |   +3.02 | true
+  15  |     7237.04 |     7142.93 |   -1.30 | true
+  16  |     1132.08 |     1098.27 |   -2.99 | true
+  17  |     9370.88 |     9590.21 |   +2.34 | true
+  18  |    17670.13 |    17229.55 |   -2.49 | true
+  19  |      291.94 |      259.29 |  -11.18 | true
+  20  |     7173.15 |     7066.40 |   -1.49 | true
+  21  |     2177.83 |     2397.98 |  +10.11 | true
+  22  |      367.69 |      382.32 |   +3.98 | true
  ---- | ----------- | ----------- | ------- |
- Sum  |             |   117848.96 |         |
+ Sum  |    98281.23 |   101794.06 |   +3.57 |
 (24 rows)
 
 -- or run queries which you want by id, 1 to 99
-[local]:15432 asky@regress=# select * from tpch(1,2,3,5,8);
+[local]:15432 292864 asky@regress=# select * from tpch(4,4,6,6);
  Qid  | Stable(ms)  | Current(ms) | Diff(%) | Result
 ------+-------------+-------------+---------+--------
-  01  |      182.32 |      175.95 |   -3.50 | true
-  02  |       19.02 |       20.89 |   +9.84 | true
-  03  |       47.69 |       45.14 |   -5.34 | true
-  05  |       27.71 |       31.94 |  +15.27 | true
-  08  |       54.74 |       56.16 |   +2.58 | true
+  04  |      745.93 |      713.70 |   -4.32 | true
+  04  |      745.93 |      737.73 |   -1.10 | true
+  06  |      866.87 |      899.95 |   +3.82 | true
+  06  |      866.87 |      909.38 |   +4.90 | true
  ---- | ----------- | ----------- | ------- |
- Sum  |      331.47 |      330.07 |   -0.42 |
-(7 rows)
+ Sum  |     3225.60 |     3260.76 |   +1.09 |
+(6 rows)
+
 -- get all queries
 select * from tpch_queries();
 
@@ -152,5 +155,6 @@ drop extension pg_tpch;
 
 - [ ] check query result correctness
 - [ ] support postgres 12 or higher
-- [ ] async dsdgen, need provide a async function to generate data set, or use dblink
+- [ ] load data
+- [ ] async dbgen, need provide a async function to generate data set, or use dblink
     - Avoid relying on other extensions, we can do it ourselves.

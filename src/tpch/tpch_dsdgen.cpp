@@ -22,11 +22,13 @@
 extern "C" {
 #include <postgres.h>
 
+#include <access/table.h>
 #include <executor/spi.h>
 #include <lib/stringinfo.h>
 #include <libpq/pqformat.h>
 #include <miscadmin.h>
 #include <utils/builtins.h>
+#include <utils/lsyscache.h>
 }
 
 #include "dss.h"
@@ -60,7 +62,6 @@ DSSType call_dbgen_mk(size_t idx, MKRetType (*mk_fn)(DSS_HUGE, DSSType* val, DBG
 TPCHTableGenerator::TPCHTableGenerator(double scale_factor, const std::string& table,
                                        std::filesystem::path resource_dir, int rng_seed)
     : table_{std::move(table)} {
-  // atexit([]() { throw std::runtime_error("TPCHTableGenerator internal error"); });
   tdef* tdefs = ctx_.tdefs;
   tdefs[PART].base = 200000;
   tdefs[PSUPP].base = 200000;
@@ -99,94 +100,88 @@ TPCHTableGenerator::~TPCHTableGenerator() {
 
 class TableLoader {
  public:
-  TableLoader(const std::string& table, size_t col_size, size_t batch_size)
-      : table_{std::move(table)}, col_size_(col_size), batch_size_(batch_size) {
+  TableLoader(const std::string& table) : table_{std::move(table)} {
     if (SPI_connect() != SPI_OK_CONNECT)
       throw std::runtime_error("SPI_connect Failed");
+
+    reloid_ = DirectFunctionCall1(regclassin, CStringGetDatum(table_.c_str()));
+    rel_ = try_table_open(reloid_, RowExclusiveLock);
+    if (!rel_)
+      throw std::runtime_error("try_table_open Failed");
+
+    auto tupDesc = RelationGetDescr(rel_);
+    Oid in_func_oid;
+
+    in_functions = new FmgrInfo[tupDesc->natts];
+    typioparams = new Oid[tupDesc->natts];
+
+    for (auto attnum = 1; attnum <= tupDesc->natts; attnum++) {
+      Form_pg_attribute att = TupleDescAttr(tupDesc, attnum - 1);
+
+      getTypeInputInfo(att->atttypid, &in_func_oid, &typioparams[attnum - 1]);
+      fmgr_info(in_func_oid, &in_functions[attnum - 1]);
+    }
+
+    slot = MakeSingleTupleTableSlot(tupDesc, &TTSOpsMinimalTuple);
+    slot->tts_tableOid = RelationGetRelid(rel_);
   };
 
   ~TableLoader() {
-    if (curr_batch_ != 0) {
-      auto insert = std::format("INSERT INTO {} VALUES {}", table_, sql);
-      SPI_exec(insert.c_str(), 0);
-    }
     SPI_finish();
-  }
-
-  auto& start() {
-    curr_batch_++;
-    row_count_++;
-    if (curr_batch_ < batch_size_) {
-      if (curr_batch_ != 1)
-        sql += ",";
-    } else {
-      // do insert
-      auto insert = std::format("INSERT INTO {} VALUES {}", table_, sql);
-      auto result = SPI_exec(insert.c_str(), 0);
-      if (result != SPI_OK_INSERT) {
-        throw std::runtime_error("TPCHTableGenerator internal error");
-      }
-      sql.clear();
-      curr_batch_ = 1;
-    }
-    sql += "(";
-
-    return *this;
-  }
-
-  auto& addItem(const std::string& value) {
-    curr_cid_++;
-
-    std::string pos;
-    if (curr_cid_ < col_size_)
-      pos = ",";
-    else
-      pos = "";
-
-    sql += std::format("{}{}", value, pos);
-
-    return *this;
+    table_close(rel_, RowExclusiveLock);
+    free(in_functions);
+    free(typioparams);
+    ExecDropSingleTupleTableSlot(slot);
   }
 
   template <typename T>
-    requires(std::is_trivial_v<T>)
   auto& addItem(T value) {
-    curr_cid_++;
+    Datum datum;
+    if constexpr (std::is_same_v<T, char*> || std::is_same_v<T, const char*> || std::is_same_v<T, char>)
+      slot->tts_values[current_item_] = DirectFunctionCall3(
+          in_functions[current_item_].fn_addr, CStringGetDatum(value), ObjectIdGetDatum(typioparams[current_item_]),
+          TupleDescAttr(RelationGetDescr(rel_), current_item_)->atttypmod);
+    else  // else check
+      slot->tts_values[current_item_] = value;
 
-    std::string pos;
-    if (curr_cid_ < col_size_)
-      pos = ",";
-    else
-      pos = "";
+    current_item_++;
+    return *this;
+  }
 
-    if constexpr (std::is_same_v<std::remove_cv_t<T>, char*> || std::is_same_v<std::remove_cv_t<T>, const char*> ||
-                  std::is_same_v<std::remove_cv_t<T>, char> || std::is_same_v<std::remove_cv_t<T>, const char>)
-      sql += std::format("'{}'{}", value, pos);
-    else
-      sql += std::format("{}{}", value, pos);
-
+  auto& start() {
+    ExecClearTuple(slot);
+    MemSet(slot->tts_values, 0, RelationGetDescr(rel_)->natts * sizeof(Datum));
+    /* all tpch table is not null */
+    MemSet(slot->tts_isnull, false, RelationGetDescr(rel_)->natts * sizeof(bool));
+    current_item_ = 0;
     return *this;
   }
 
   auto& end() {
-    sql += ")";
-    if (col_size_ != curr_cid_)
-      throw std::runtime_error("TPCHTableGenerator internal error");
-    curr_cid_ = 0;
+    ExecStoreVirtualTuple(slot);
 
+    table_tuple_insert(rel_, slot, mycid, ti_options, NULL);
+    // reindex ？
+    // if (rel_->ri_NumIndices > 0)
+    //   recheckIndexes = ExecInsertIndexTuples(rel_, myslot, estate, false, false, NULL, NIL, false);
+
+    row_count_++;
     return *this;
   }
 
   auto row_count() const { return row_count_; }
 
- private:
+  Oid reloid_;
+  Relation rel_;
   std::string table_;
-  std::string sql;
-  size_t col_size_;
-  size_t curr_cid_ = 0;
-  size_t batch_size_;
-  size_t curr_batch_ = 0;
   size_t row_count_ = 0;
+  size_t current_item_ = 0;
+
+  FmgrInfo* in_functions;
+  Oid* typioparams;
+  TupleTableSlot* slot;
+  CommandId mycid = GetCurrentCommandId(true);
+  int ti_options = 0;
 };
 
 /* convert by databse, this is  cents / (100::numeric(15,2)) */
@@ -194,13 +189,55 @@ std::string convert_money(DSS_HUGE cents) {
   return std::format("{}/100::numeric(15,2)", cents);
 }
 
+std::string convert_money_str(DSS_HUGE cents) {
+  if (cents < 0; cents = std::abs(cents))
+    return std::format("-{}.{}", cents / 100, cents % 100);
+  else
+    return std::format("{}.{}", cents / 100, cents % 100);
+}
+
+std::string convert_str(auto date) {
+  return std::format("{}", date);
+}
+
 int TPCHTableGenerator::generate_customer() {
   const auto customer_count = static_cast<uint32_t>(ctx_.tdefs[CUST].base * ctx_.scale_factor);
 
-  TableLoader loader(table_, 8, 100);
+  TableLoader loader(table_);
 
   for (auto row_idx = size_t{0}; row_idx < customer_count; row_idx++) {
     auto customer = call_dbgen_mk<customer_t>(row_idx + 1, mk_cust, TPCHTable::Customer, &ctx_);
+
+    /*
+
+
+    regclassin
+    table_open(id, RowExclusiveLock)
+    TupleDesc	tupdesc = rel->rd_att;
+    NextCopyFrom
+
+    table_tuple_insert(rel_, slot, mycid, ti_options, NULL);
+
+    PG_GETARG_OID    regclass
+
+    values[0] = Int64GetDatum(opaq->rightlink);
+    values[1] = Int32GetDatum(opaq->maxoff);
+    values[2] = PointerGetDatum(construct_array_builtin(flags, nflags, TEXTOID));
+    heap_form_tuple(tupdesc, values, nulls)
+    c_custkey    | bigint                     int8in
+    c_name       | character varying
+    c_address    | character varying
+    c_nationkey  | integer
+    c_phone      | character varying
+    c_acctbal    | numeric(15,2)             numeric_in
+    c_mktsegment | character varying
+    c_comment    | character varying
+
+    date    date_in
+
+    DirectFunctionCall1(date_in, CStringGetDatum())
+    DirectFunctionCall1(date_in, CStringGetDatum())
+    */
 
     loader.start()
         .addItem(customer.custkey)
@@ -208,7 +245,7 @@ int TPCHTableGenerator::generate_customer() {
         .addItem(customer.address)
         .addItem(customer.nation_code)
         .addItem(customer.phone)
-        .addItem(convert_money(customer.acctbal))
+        .addItem(convert_money_str(customer.acctbal).data())
         .addItem(customer.mktsegment)
         .addItem(customer.comment)
         .end();
@@ -220,8 +257,8 @@ int TPCHTableGenerator::generate_customer() {
 std::pair<int, int> TPCHTableGenerator::generate_orders_and_lineitem() {
   const auto order_count = static_cast<size_t>(ctx_.tdefs[ORDER].base * ctx_.scale_factor);
 
-  TableLoader order_loader("orders", 9, 100);
-  TableLoader lineitem_loader("lineitem", 16, 100);
+  TableLoader order_loader("orders");
+  TableLoader lineitem_loader("lineitem");
 
   for (auto order_idx = size_t{0}; order_idx < order_count; ++order_idx) {
     const auto order = call_dbgen_mk<order_t>(order_idx + 1, mk_order, TPCHTable::Orders, &ctx_, 0l);
@@ -229,8 +266,8 @@ std::pair<int, int> TPCHTableGenerator::generate_orders_and_lineitem() {
     order_loader.start()
         .addItem(order.okey)
         .addItem(order.custkey)
-        .addItem(order.orderstatus)
-        .addItem(convert_money(order.totalprice))
+        .addItem(convert_str(order.orderstatus).data())
+        .addItem(convert_money_str(order.totalprice).data())
         .addItem(order.odate)
         .addItem(order.opriority)
         .addItem(order.clerk)
@@ -246,12 +283,12 @@ std::pair<int, int> TPCHTableGenerator::generate_orders_and_lineitem() {
           .addItem(lineitem.partkey)
           .addItem(lineitem.suppkey)
           .addItem(lineitem.lcnt)
-          .addItem(lineitem.quantity)
-          .addItem(convert_money(lineitem.eprice))
-          .addItem(convert_money(lineitem.discount))
-          .addItem(convert_money(lineitem.tax))
-          .addItem(lineitem.rflag[0])
-          .addItem(lineitem.lstatus[0])
+          .addItem(convert_money_str(lineitem.quantity).data())
+          .addItem(convert_money_str(lineitem.eprice).data())
+          .addItem(convert_money_str(lineitem.discount).data())
+          .addItem(convert_money_str(lineitem.tax).data())
+          .addItem(convert_str(lineitem.rflag[0]).data())
+          .addItem(convert_str(lineitem.lstatus[0]).data())
           .addItem(lineitem.sdate)
           .addItem(lineitem.cdate)
           .addItem(lineitem.rdate)
@@ -268,7 +305,7 @@ std::pair<int, int> TPCHTableGenerator::generate_orders_and_lineitem() {
 int TPCHTableGenerator::generate_nation() {
   const auto nation_count = static_cast<size_t>(ctx_.tdefs[NATION].base);
 
-  TableLoader loader(table_, 4, 100);
+  TableLoader loader(table_);
 
   for (auto nation_idx = size_t{0}; nation_idx < nation_count; ++nation_idx) {
     const auto nation = call_dbgen_mk<code_t>(nation_idx + 1, mk_nation, TPCHTable::Nation, &ctx_);
@@ -281,8 +318,8 @@ int TPCHTableGenerator::generate_nation() {
 std::pair<int, int> TPCHTableGenerator::generate_part_and_partsupp() {
   const auto part_count = static_cast<size_t>(ctx_.tdefs[PART].base * ctx_.scale_factor);
 
-  TableLoader part_loader("part", 9, 100);
-  TableLoader partsupp_loader("partsupp", 5, 100);
+  TableLoader part_loader("part");
+  TableLoader partsupp_loader("partsupp");
 
   for (auto part_idx = size_t{0}; part_idx < part_count; ++part_idx) {
     const auto part = call_dbgen_mk<part_t>(part_idx + 1, mk_part, TPCHTable::Part, &ctx_);
@@ -295,7 +332,7 @@ std::pair<int, int> TPCHTableGenerator::generate_part_and_partsupp() {
         .addItem(part.type)
         .addItem(part.size)
         .addItem(part.container)
-        .addItem(convert_money(part.retailprice))
+        .addItem(convert_money_str(part.retailprice).data())
         .addItem(part.comment)
         .end();
 
@@ -304,7 +341,7 @@ std::pair<int, int> TPCHTableGenerator::generate_part_and_partsupp() {
           .addItem(partsupp.partkey)
           .addItem(partsupp.suppkey)
           .addItem(partsupp.qty)
-          .addItem(convert_money(partsupp.scost))
+          .addItem(convert_money_str(partsupp.scost).data())
           .addItem(partsupp.comment)
           .end();
     }
@@ -316,7 +353,7 @@ std::pair<int, int> TPCHTableGenerator::generate_part_and_partsupp() {
 int TPCHTableGenerator::generate_region() {
   const auto region_count = static_cast<size_t>(ctx_.tdefs[REGION].base);
 
-  TableLoader loader(table_, 3, 100);
+  TableLoader loader(table_);
 
   for (auto region_idx = size_t{0}; region_idx < region_count; ++region_idx) {
     const auto region = call_dbgen_mk<code_t>(region_idx + 1, mk_region, TPCHTable::Region, &ctx_);
@@ -329,7 +366,7 @@ int TPCHTableGenerator::generate_region() {
 int TPCHTableGenerator::generate_supplier() {
   const auto supplier_count = static_cast<size_t>(ctx_.tdefs[SUPP].base * ctx_.scale_factor);
 
-  TableLoader loader(table_, 7, 100);
+  TableLoader loader(table_);
 
   for (auto supplier_idx = size_t{0}; supplier_idx < supplier_count; ++supplier_idx) {
     const auto supplier = call_dbgen_mk<supplier_t>(supplier_idx + 1, mk_supp, TPCHTable::Supplier, &ctx_);
@@ -340,7 +377,7 @@ int TPCHTableGenerator::generate_supplier() {
         .addItem(supplier.address)
         .addItem(supplier.nation_code)
         .addItem(supplier.phone)
-        .addItem(convert_money(supplier.acctbal))
+        .addItem(convert_money_str(supplier.acctbal).data())
         .addItem(supplier.comment)
         .end();
   }

@@ -10,6 +10,10 @@
 
 #include "dss.h"
 
+extern "C" {
+#include "postgres_ext.h"
+}
+
 namespace tpch {
 
 enum class TPCHTable { Part, PartSupp, Supplier, Customer, Orders, LineItem, Nation, Region };
