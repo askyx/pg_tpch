@@ -32,10 +32,9 @@ CREATE FUNCTION dbgen(sf DOUBLE PRECISION, overwrite BOOLEAN DEFAULT FALSE) RETU
 DECLARE
     rec RECORD;
     r_count RECORD;
+    cleanup boolean;
 BEGIN
-    IF overwrite THEN
-        SELECT tpch_cleanup(true);
-    END IF;
+    cleanup := tpch_cleanup(overwrite);
 
     FOR rec IN SELECT table_name, status, child FROM tpch.tpch_tables LOOP
         IF rec.status <> 1 THEN
@@ -43,10 +42,14 @@ BEGIN
             tab := rec.table_name;
             row_count := r_count.t1_count;
             RETURN NEXT;
+            EXECUTE 'REINDEX TABLE ' || rec.table_name;
+            EXECUTE 'ANALYZE ' || rec.table_name;
             IF rec.status = 2 THEN
                 tab := rec.child;
                 row_count := r_count.t2_count;
                 RETURN NEXT;
+                EXECUTE 'REINDEX TABLE ' || rec.child;
+                EXECUTE 'ANALYZE ' || rec.child;
             END IF;
         END IF;
     END LOOP;

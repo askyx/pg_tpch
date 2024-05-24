@@ -2,6 +2,14 @@
 
 A plug-and-play postgres extension for testing tpch, inspired by [duckdb](https://github.com/duckdb/duckdb.git) and [hyrise](https://github.com/hyrise/hyrise.git), to avoid the cumbersome configuration in tpch. Only need to install the extension, and then you can run the test.
 
+### 亮点
+
+- 基于PostgreSQL的TPC-H测试扩展，支持TPC-H的22个查询，并提供数据生成脚本。
+- 自动生成TPC-H数据集，并加载到PostgreSQL中。
+- 自动测试TPC-H的22个查询，并记录运行时间和结果。
+- 支持异步数据生成。
+
+
 ### REQUIREMENTS
 
 - PostgreSQL
@@ -155,6 +163,5 @@ drop extension pg_tpch;
 
 - [ ] check query result correctness
 - [ ] support postgres 12 or higher
-- [ ] load data
 - [ ] async dbgen, need provide a async function to generate data set, or use dblink
     - Avoid relying on other extensions, we can do it ourselves.

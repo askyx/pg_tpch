@@ -23,5 +23,7 @@ target_include_directories(tpch
 target_compile_options(tpch
   PUBLIC
     "-fPIC"
+    "-Wno-write-strings"
+    "-Wno-format-truncation"
 )
 
