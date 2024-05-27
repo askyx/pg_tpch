@@ -20,6 +20,10 @@ target_include_directories(tpch
     ${PostgreSQL_SERVER_INCLUDE_DIRS}
 )
 
+target_link_libraries(tpch
+  PUBLIC
+    pq)
+
 target_compile_options(tpch
   PUBLIC
     "-fPIC"

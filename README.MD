@@ -22,7 +22,6 @@ make sure you have installed the postgres and the `pg_config` is in your PATH.
 
 ```
 git clone https://github.com/asky/pg_tpch.git
-git submodule update
 cd pg_tpch
 cmake -Bbuild
 cmake --build build --target install
