@@ -128,35 +128,32 @@ tpch_runner_result *TPCHWrapper::RunTPCH(int qid) {
     throw std::runtime_error(std::format("Queries file for qid: {} does not exist", qid));
 }
 
-std::pair<int, int> TPCHWrapper::DBGen(double scale, char *table) {
+std::pair<int, int> TPCHWrapper::DBGen(double scale, char *table, int children, int step) {
+  if (step >= children)
+    return {0, 0};
+
   const std::filesystem::path extension_dir = get_extension_external_directory();
-  TPCHTableGenerator generator(scale, table, extension_dir);
 
-#define CASE(tbl)                 \
-  if (std::string{table} == #tbl) \
-    return {generator.generate_##tbl(), 0};
+#define CALL_GENTBL(tbl, tbl_id, fuc)                                                  \
+  if (strcasecmp(table, #tbl) == 0) {                                                  \
+    TPCHTableGenerator generator(scale, table, tbl_id, children, step, extension_dir); \
+    return generator.fuc();                                                            \
+  }
 
-#define CASE_ERROR(tbl)           \
-  if (std::string{table} == #tbl) \
-    throw std::runtime_error(std::format("Table {} is a child; it is populated during the build of its parent", #tbl));
+  CALL_GENTBL(customer, CUST, generate_customer)
+  CALL_GENTBL(nation, NATION, generate_nation)
+  CALL_GENTBL(region, REGION, generate_region)
+  CALL_GENTBL(supplier, SUPP, generate_supplier)
+  CALL_GENTBL(orders, ORDER_LINE, generate_orders_and_lineitem)
+  CALL_GENTBL(part, PART_PSUPP, generate_part_and_partsupp)
 
-  CASE(customer)
-  CASE(nation)
-  CASE(region)
-  CASE(supplier)
+#undef CALL_GENTBL
 
-  CASE_ERROR(lineitem)
-  CASE_ERROR(partsupp)
+  if (strcasecmp(table, "lineitem") || strcasecmp(table, "partsupp"))
+    throw std::runtime_error(
+        std::format("Table {} is a child; it is populated during the build of its parent", "lineitem"));
 
-  if (std::string{table} == "orders")
-    return generator.generate_orders_and_lineitem();
-
-  if (std::string{table} == "part")
-    return generator.generate_part_and_partsupp();
-
-#undef CASE_ERROR
-#undef CASE
   throw std::runtime_error(std::format("Table {} does not exist", table));
-}
+}  // namespace tpch
 
 }  // namespace tpch

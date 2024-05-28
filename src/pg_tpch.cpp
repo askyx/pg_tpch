@@ -46,9 +46,9 @@ static int tpch_num_queries() {
   return tpch::TPCHWrapper::QueriesCount();
 }
 
-static void dbgen_internal(double scale_factor, char* table, int* count1, int* count2) {
+static void dbgen_internal(double scale_factor, char* table, int children, int step, int* count1, int* count2) {
   try {
-    auto count = tpch::TPCHWrapper::DBGen(scale_factor, table);
+    auto count = tpch::TPCHWrapper::DBGen(scale_factor, table, children, step);
     *count1 = count.first;
     *count2 = count.second;
   } catch (const std::exception& e) {
@@ -143,6 +143,8 @@ PG_FUNCTION_INFO_V1(dbgen_internal);
 Datum dbgen_internal(PG_FUNCTION_ARGS) {
   double sf = PG_GETARG_FLOAT8(0);
   char* table = text_to_cstring(PG_GETARG_TEXT_PP(1));
+  int children = PG_GETARG_INT32(2);
+  int step = PG_GETARG_INT32(3);
   int count1 = 0;
   int count2 = 0;
 
@@ -153,7 +155,7 @@ Datum dbgen_internal(PG_FUNCTION_ARGS) {
   if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
     elog(ERROR, "return type must be a row type");
 
-  tpch::dbgen_internal(sf, table, &count1, &count2);
+  tpch::dbgen_internal(sf, table, children, step, &count1, &count2);
 
   values[0] = count1;
   values[1] = count2;

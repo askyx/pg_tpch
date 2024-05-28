@@ -1,6 +1,8 @@
 CREATE FUNCTION dbgen_internal(
   IN sf DOUBLE PRECISION,
   IN gentable TEXT,
+  IN children INT DEFAULT 1,
+  IN current_step INT DEFAULT -1,
   OUT t1_count INT,
   OUT t2_count INT
 ) RETURNS record AS 'MODULE_PATHNAME',
@@ -34,38 +36,60 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE FUNCTION dbgen(sf DOUBLE PRECISION, overwrite BOOLEAN DEFAULT TRUE) RETURNS TABLE(tab TEXT, row_count INT) AS $$
+CREATE FUNCTION dbgen(
+  scale_factor DOUBLE PRECISION,
+  should_overwrite BOOLEAN DEFAULT TRUE
+) RETURNS TABLE(tab TEXT, row_count INT) AS $$
 DECLARE
     rec RECORD;
-    r_count RECORD;
-    cleanup boolean;
+    row_count_rec RECORD;
+    cleanup_needed BOOLEAN;
+    host_core_count INT;
+    total_table_weight INT;
+    num_children INT;
+    query_text TEXT;
 BEGIN
-    cleanup := tpch_cleanup(overwrite);
+    cleanup_needed := tpch_cleanup(should_overwrite);
 
-    create temp table cid_table(cid INT, c_name text, c_stat INT, c_child text);
+    CREATE TEMP TABLE temp_cid_table(cid INT, c_name TEXT, c_status INT, c_child TEXT);
+    CREATE TEMP TABLE temp_count_table(c_name TEXT, c_count INT);
 
-    FOR rec IN SELECT table_name, status, child FROM tpch.tpch_tables LOOP
-        IF rec.status <> 1 THEN
-            INSERT INTO cid_table select cid, rec.table_name, rec.status, rec.child from tpch_async_submit(format('select * from dbgen_internal(%s, %L)', sf, rec.table_name));
+    SELECT host_core INTO host_core_count FROM tpch.tpch_host_info;
+
+    SELECT SUM(weight) INTO total_table_weight FROM tpch.tpch_tables;
+
+    FOR rec IN SELECT table_name, status, child, weight FROM tpch.tpch_tables LOOP
+        -- children table
+        IF rec.status = 2 THEN
+            CONTINUE;
         END IF;
+        num_children := CEIL(rec.weight::NUMERIC / total_table_weight * host_core_count);
+        FOR i IN 0..num_children - 1 LOOP
+            query_text := format('SELECT * FROM dbgen_internal(%s, %L, %s, %s)', scale_factor, rec.table_name, num_children, i);
+            INSERT INTO temp_cid_table SELECT cid, rec.table_name, rec.status, rec.child FROM tpch_async_submit(query_text);
+        END LOOP;
     END LOOP;
         
-    FOR rec IN SELECT cid, c_name, c_stat, c_child FROM cid_table LOOP
-        SELECT t1_count, t2_count INTO r_count FROM tpch_async_consum(rec.cid);
-        tab := rec.c_name;
-        row_count := r_count.t1_count;
-        RETURN NEXT;
+    FOR rec IN SELECT cid, c_name, c_status, c_child FROM temp_cid_table LOOP
+        SELECT t1_count, t2_count INTO row_count_rec FROM tpch_async_consum(rec.cid);
+        INSERT INTO temp_count_table VALUES(rec.c_name, row_count_rec.t1_count);
+
         EXECUTE 'REINDEX TABLE ' || rec.c_name;
         EXECUTE 'ANALYZE ' || rec.c_name;
-        IF rec.c_stat = 2 THEN
-            tab := rec.c_child;
-            row_count := r_count.t2_count;
-            RETURN NEXT;
+        IF rec.c_status = 1 THEN
+            INSERT INTO temp_count_table VALUES(rec.c_child, row_count_rec.t2_count);
+
             EXECUTE 'REINDEX TABLE ' || rec.c_child;
             EXECUTE 'ANALYZE ' || rec.c_child;
         END IF;
     END LOOP;
-    drop table cid_table;
+    FOR rec IN SELECT c_name, sum(c_count) as count FROM temp_count_table GROUP BY c_name order by 2 LOOP
+        tab := rec.c_name;
+        row_count := rec.count;
+        RETURN NEXT;
+    END LOOP;
+    DROP TABLE temp_cid_table;
+    DROP TABLE temp_count_table;
 END;
 $$ LANGUAGE plpgsql;
 

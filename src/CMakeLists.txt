@@ -7,8 +7,13 @@ add_postgresql_extension(
   SOURCES pg_tpch.cpp
   SCRIPTS pg_tpch--1.0.sql)
 
-message("Building pg_tpch extension ${tpch}")
 target_link_libraries(pg_tpch tpch)
+
+cmake_host_system_information(RESULT core_num QUERY NUMBER_OF_LOGICAL_CORES)
+
+file(APPEND
+  ${CMAKE_CURRENT_SOURCE_DIR}/pre_prepare.sql
+  "update tpch.tpch_host_info set host_core = ${core_num};\n")
 
 set(TPCH_CURR_DIR ${CMAKE_CURRENT_SOURCE_DIR}/tpch)
 set(TPCH_INSTALL_DIR ${PostgreSQL_EXTENSION_DIR}/tpch)

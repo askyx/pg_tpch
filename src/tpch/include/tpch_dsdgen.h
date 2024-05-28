@@ -16,24 +16,27 @@ extern "C" {
 
 namespace tpch {
 
-enum class TPCHTable { Part, PartSupp, Supplier, Customer, Orders, LineItem, Nation, Region };
 class TPCHTableGenerator {
  public:
-  TPCHTableGenerator(double scale_factor, const std::string& table, std::filesystem::path resource_dir,
-                     int rng_seed = 19620718);
+  TPCHTableGenerator(double scale_factor, const std::string& table, int table_id, int children, int step,
+                     std::filesystem::path resource_dir, int rng_seed = 19620718);
 
   ~TPCHTableGenerator();
 
-  int generate_customer();
+  std::pair<int, int> generate_customer();
   std::pair<int, int> generate_orders_and_lineitem();
-  int generate_nation();
+  std::pair<int, int> generate_nation();
   std::pair<int, int> generate_part_and_partsupp();
-  int generate_region();
-  int generate_supplier();
+  std::pair<int, int> generate_region();
+  std::pair<int, int> generate_supplier();
 
  private:
   std::string table_;
+  int table_id_;
   DBGenContext ctx_;
+
+  size_t part_offset_{0};
+  size_t rowcnt_{0};
 };
 
 }  // namespace tpch

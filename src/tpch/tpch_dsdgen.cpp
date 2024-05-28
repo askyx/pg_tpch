@@ -1,10 +1,13 @@
 #include <algorithm>
+#include <chrono>
 #include <climits>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
 #include <format>
+#include <iostream>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -36,15 +39,9 @@ extern "C" {
 
 namespace tpch {
 
-const std::unordered_map<TPCHTable, std::underlying_type_t<TPCHTable>> tpch_table_to_dbgen_id = {
-    {TPCHTable::Part, PART},    {TPCHTable::PartSupp, PSUPP}, {TPCHTable::Supplier, SUPP}, {TPCHTable::Customer, CUST},
-    {TPCHTable::Orders, ORDER}, {TPCHTable::LineItem, LINE},  {TPCHTable::Nation, NATION}, {TPCHTable::Region, REGION}};
-
 template <typename DSSType, typename MKRetType, typename... Args>
 void call_dbgen_mk(size_t idx, DSSType& value, MKRetType (*mk_fn)(DSS_HUGE, DSSType* val, DBGenContext* ctx, Args...),
-                   TPCHTable table, DBGenContext* ctx, Args... args) {
-  const auto dbgen_table_id = tpch_table_to_dbgen_id.at(table);
-
+                   int dbgen_table_id, DBGenContext* ctx, Args... args) {
   row_start(dbgen_table_id, ctx);
 
   mk_fn(idx, &value, ctx, std::forward<Args>(args)...);
@@ -52,9 +49,34 @@ void call_dbgen_mk(size_t idx, DSSType& value, MKRetType (*mk_fn)(DSS_HUGE, DSST
   row_stop_h(dbgen_table_id, ctx);
 }
 
-TPCHTableGenerator::TPCHTableGenerator(double scale_factor, const std::string& table,
-                                       std::filesystem::path resource_dir, int rng_seed)
-    : table_{std::move(table)} {
+void skip(int table, int children, DSS_HUGE step, DBGenContext& dbgen_ctx) {
+  switch (table) {
+    case CUST:
+      sd_cust(children, step, &dbgen_ctx);
+      break;
+    case SUPP:
+      sd_supp(children, step, &dbgen_ctx);
+      break;
+    case NATION:
+      sd_nation(children, step, &dbgen_ctx);
+      break;
+    case REGION:
+      sd_region(children, step, &dbgen_ctx);
+      break;
+    case ORDER_LINE:
+      sd_line(children, step, &dbgen_ctx);
+      sd_order(children, step, &dbgen_ctx);
+      break;
+    case PART_PSUPP:
+      sd_part(children, step, &dbgen_ctx);
+      sd_psupp(children, step, &dbgen_ctx);
+      break;
+  }
+}
+
+TPCHTableGenerator::TPCHTableGenerator(double scale_factor, const std::string& table, int table_id, int children,
+                                       int step, std::filesystem::path resource_dir, int rng_seed)
+    : table_{std::move(table)}, table_id_{table_id} {
   tdef* tdefs = ctx_.tdefs;
   tdefs[PART].base = 200000;
   tdefs[PSUPP].base = 200000;
@@ -85,6 +107,21 @@ TPCHTableGenerator::TPCHTableGenerator(double scale_factor, const std::string& t
   load_dists(10 * 1024 * 1024, &ctx_);  // 10MiB
   tdefs[NATION].base = nations.count;
   tdefs[REGION].base = regions.count;
+
+  {
+    if (table_id_ < NATION)
+      rowcnt_ = tdefs[table_id_].base * ctx_.scale_factor;
+    else
+      rowcnt_ = tdefs[table_id_].base;
+
+    if (children > 1 && step != -1) {
+      size_t part_size = std::ceil((double)rowcnt_ / (double)children);
+      part_offset_ = part_size * step;
+      auto part_end = part_offset_ + part_size;
+      rowcnt_ = part_end > rowcnt_ ? rowcnt_ - part_offset_ : part_size;
+      skip(table_id_, children, part_offset_, ctx_);
+    }
+  }
 }
 
 TPCHTableGenerator::~TPCHTableGenerator() {
@@ -185,14 +222,12 @@ std::string convert_str(auto date) {
   return std::format("{}", date);
 }
 
-int TPCHTableGenerator::generate_customer() {
-  const auto customer_count = static_cast<uint32_t>(ctx_.tdefs[CUST].base * ctx_.scale_factor);
-
+std::pair<int, int> TPCHTableGenerator::generate_customer() {
   TableLoader loader(table_);
 
   customer_t customer{};
-  for (auto row_idx = size_t{0}; row_idx < customer_count; row_idx++) {
-    call_dbgen_mk<customer_t>(row_idx + 1, customer, mk_cust, TPCHTable::Customer, &ctx_);
+  for (auto row_idx = part_offset_; rowcnt_; rowcnt_--, row_idx++) {
+    call_dbgen_mk<customer_t>(row_idx + 1, customer, mk_cust, CUST, &ctx_);
 
     loader.start()
         .addItem(customer.custkey)
@@ -206,19 +241,25 @@ int TPCHTableGenerator::generate_customer() {
         .end();
   }
 
-  return loader.row_count();
+  return {loader.row_count(), 0};
 }
 
 std::pair<int, int> TPCHTableGenerator::generate_orders_and_lineitem() {
-  const auto order_count = static_cast<size_t>(ctx_.tdefs[ORDER].base * ctx_.scale_factor);
-
   TableLoader order_loader("orders");
   TableLoader lineitem_loader("lineitem");
 
   order_t order{};
-  for (auto order_idx = size_t{0}; order_idx < order_count; ++order_idx) {
-    call_dbgen_mk<order_t>(order_idx + 1, order, mk_order, TPCHTable::Orders, &ctx_, 0l);
+  // auto start = std::chrono::high_resolution_clock::now();
+  // std::chrono::duration<double> o_elapsed_time = std::chrono::duration<double>::zero();
+  // std::chrono::duration<double> o_elapsed_time1 = std::chrono::duration<double>::zero();
+  // std::chrono::duration<double> o_elapsed_time2 = std::chrono::duration<double>::zero();
+  for (auto order_idx = part_offset_; rowcnt_; rowcnt_--, ++order_idx) {
+    // auto o_start = std::chrono::high_resolution_clock::now();
+    call_dbgen_mk<order_t>(order_idx + 1, order, mk_order, ORDER_LINE, &ctx_, 0l);
+    // auto o_end = std::chrono::high_resolution_clock::now();
+    // o_elapsed_time += (o_end - o_start);
 
+    // auto o_start1 = std::chrono::high_resolution_clock::now();
     order_loader.start()
         .addItem(order.okey)
         .addItem(order.custkey)
@@ -230,7 +271,10 @@ std::pair<int, int> TPCHTableGenerator::generate_orders_and_lineitem() {
         .addItem(order.spriority)
         .addItem(order.comment)
         .end();
+    // auto o_end1 = std::chrono::high_resolution_clock::now();
+    // o_elapsed_time1 += (o_end1 - o_start1);
 
+    // auto o_start2 = std::chrono::high_resolution_clock::now();
     for (auto line_idx = int64_t{0}; line_idx < order.lines; ++line_idx) {
       const auto& lineitem = order.l[line_idx];
 
@@ -253,34 +297,40 @@ std::pair<int, int> TPCHTableGenerator::generate_orders_and_lineitem() {
           .addItem(lineitem.comment)
           .end();
     }
+    // auto o_end2 = std::chrono::high_resolution_clock::now();
+    // o_elapsed_time2 += (o_end2 - o_start2);
   }
-
+  /*
+    auto end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> elapsed_time = end - start;
+    整个循环执行时间: 50.3691 秒 order:2.89651 秒 xx1:5.08051 秒 xx2:42.0685 秒
+    lineitem de 耗时最久，需要加入 批量 insert 操作，当前先实现 并行任务的分割
+    std::cout << "整个循环执行时间: " << elapsed_time.count() << " 秒" << " order:" << o_elapsed_time.count() << " 秒"
+              << " xx1:" << o_elapsed_time1.count() << " 秒" << " xx2:" << o_elapsed_time2.count() << " 秒" <<
+    std::endl;
+  */
   return {order_loader.row_count(), lineitem_loader.row_count()};
 }
 
-int TPCHTableGenerator::generate_nation() {
-  const auto nation_count = static_cast<size_t>(ctx_.tdefs[NATION].base);
-
+std::pair<int, int> TPCHTableGenerator::generate_nation() {
   TableLoader loader(table_);
 
   code_t nation{};
-  for (auto nation_idx = size_t{0}; nation_idx < nation_count; ++nation_idx) {
-    call_dbgen_mk<code_t>(nation_idx + 1, nation, mk_nation, TPCHTable::Nation, &ctx_);
+  for (auto nation_idx = part_offset_; rowcnt_; rowcnt_--, ++nation_idx) {
+    call_dbgen_mk<code_t>(nation_idx + 1, nation, mk_nation, NATION, &ctx_);
     loader.start().addItem(nation.code).addItem(nation.text).addItem(nation.join).addItem(nation.comment).end();
   }
 
-  return loader.row_count();
+  return {loader.row_count(), 0};
 }
 
 std::pair<int, int> TPCHTableGenerator::generate_part_and_partsupp() {
-  const auto part_count = static_cast<size_t>(ctx_.tdefs[PART].base * ctx_.scale_factor);
-
   TableLoader part_loader("part");
   TableLoader partsupp_loader("partsupp");
 
   part_t part{};
-  for (auto part_idx = size_t{0}; part_idx < part_count; ++part_idx) {
-    call_dbgen_mk<part_t>(part_idx + 1, part, mk_part, TPCHTable::Part, &ctx_);
+  for (auto part_idx = part_offset_; rowcnt_; rowcnt_--, ++part_idx) {
+    call_dbgen_mk<part_t>(part_idx + 1, part, mk_part, PART_PSUPP, &ctx_);
 
     part_loader.start()
         .addItem(part.partkey)
@@ -308,28 +358,24 @@ std::pair<int, int> TPCHTableGenerator::generate_part_and_partsupp() {
   return {part_loader.row_count(), partsupp_loader.row_count()};
 }
 
-int TPCHTableGenerator::generate_region() {
-  const auto region_count = static_cast<size_t>(ctx_.tdefs[REGION].base);
-
+std::pair<int, int> TPCHTableGenerator::generate_region() {
   TableLoader loader(table_);
 
   code_t region{};
-  for (auto region_idx = size_t{0}; region_idx < region_count; ++region_idx) {
-    call_dbgen_mk<code_t>(region_idx + 1, region, mk_region, TPCHTable::Region, &ctx_);
+  for (auto region_idx = part_offset_; rowcnt_; rowcnt_--, ++region_idx) {
+    call_dbgen_mk<code_t>(region_idx + 1, region, mk_region, REGION, &ctx_);
     loader.start().addItem(region.code).addItem(region.text).addItem(region.comment).end();
   }
 
-  return loader.row_count();
+  return {loader.row_count(), 0};
 }
 
-int TPCHTableGenerator::generate_supplier() {
-  const auto supplier_count = static_cast<size_t>(ctx_.tdefs[SUPP].base * ctx_.scale_factor);
-
+std::pair<int, int> TPCHTableGenerator::generate_supplier() {
   TableLoader loader(table_);
 
   supplier_t supplier{};
-  for (auto supplier_idx = size_t{0}; supplier_idx < supplier_count; ++supplier_idx) {
-    call_dbgen_mk<supplier_t>(supplier_idx + 1, supplier, mk_supp, TPCHTable::Supplier, &ctx_);
+  for (auto supplier_idx = part_offset_; rowcnt_; rowcnt_--, ++supplier_idx) {
+    call_dbgen_mk<supplier_t>(supplier_idx + 1, supplier, mk_supp, SUPP, &ctx_);
 
     loader.start()
         .addItem(supplier.suppkey)
@@ -342,7 +388,7 @@ int TPCHTableGenerator::generate_supplier() {
         .end();
   }
 
-  return loader.row_count();
+  return {loader.row_count(), 0};
 }
 
 }  // namespace tpch
