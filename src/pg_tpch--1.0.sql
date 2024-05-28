@@ -9,13 +9,11 @@ CREATE FUNCTION dbgen_internal(
 CREATE FUNCTION tpch_prepare() RETURNS BOOLEAN AS 'MODULE_PATHNAME',
 'tpch_prepare' LANGUAGE C IMMUTABLE STRICT;
 
-
-CREATE FUNCTION tpch_async_submit(SQL TEXT) RETURNS int AS 'MODULE_PATHNAME',
+CREATE FUNCTION tpch_async_submit(IN SQL TEXT, OUT cid INT) RETURNS INT AS 'MODULE_PATHNAME',
 'tpch_async_submit' LANGUAGE C IMMUTABLE STRICT;
 
 CREATE FUNCTION tpch_async_consum(IN conn INT, OUT t1_count INT, OUT t2_count INT) RETURNS record AS 'MODULE_PATHNAME',
 'tpch_async_consum' LANGUAGE C IMMUTABLE STRICT;
-
 
 CREATE FUNCTION tpch_cleanup(clean_stats BOOLEAN DEFAULT FALSE) RETURNS BOOLEAN AS $$
 DECLARE
@@ -44,23 +42,30 @@ DECLARE
 BEGIN
     cleanup := tpch_cleanup(overwrite);
 
+    create temp table cid_table(cid INT, c_name text, c_stat INT, c_child text);
+
     FOR rec IN SELECT table_name, status, child FROM tpch.tpch_tables LOOP
         IF rec.status <> 1 THEN
-            SELECT t1_count, t2_count INTO r_count FROM dbgen_internal(sf, rec.table_name);
-            tab := rec.table_name;
-            row_count := r_count.t1_count;
-            RETURN NEXT;
-            EXECUTE 'REINDEX TABLE ' || rec.table_name;
-            EXECUTE 'ANALYZE ' || rec.table_name;
-            IF rec.status = 2 THEN
-                tab := rec.child;
-                row_count := r_count.t2_count;
-                RETURN NEXT;
-                EXECUTE 'REINDEX TABLE ' || rec.child;
-                EXECUTE 'ANALYZE ' || rec.child;
-            END IF;
+            INSERT INTO cid_table select cid, rec.table_name, rec.status, rec.child from tpch_async_submit(format('select * from dbgen_internal(%s, %L)', sf, rec.table_name));
         END IF;
     END LOOP;
+        
+    FOR rec IN SELECT cid, c_name, c_stat, c_child FROM cid_table LOOP
+        SELECT t1_count, t2_count INTO r_count FROM tpch_async_consum(rec.cid);
+        tab := rec.c_name;
+        row_count := r_count.t1_count;
+        RETURN NEXT;
+        EXECUTE 'REINDEX TABLE ' || rec.c_name;
+        EXECUTE 'ANALYZE ' || rec.c_name;
+        IF rec.c_stat = 2 THEN
+            tab := rec.c_child;
+            row_count := r_count.t2_count;
+            RETURN NEXT;
+            EXECUTE 'REINDEX TABLE ' || rec.c_child;
+            EXECUTE 'ANALYZE ' || rec.c_child;
+        END IF;
+    END LOOP;
+    drop table cid_table;
 END;
 $$ LANGUAGE plpgsql;
 

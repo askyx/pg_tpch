@@ -95,7 +95,7 @@ class TableLoader {
  public:
   TableLoader(const std::string& table) : table_{std::move(table)} {
     reloid_ = DirectFunctionCall1(regclassin, CStringGetDatum(table_.c_str()));
-    rel_ = try_table_open(reloid_, RowExclusiveLock);
+    rel_ = try_table_open(reloid_, NoLock);
     if (!rel_)
       throw std::runtime_error("try_table_open Failed");
 
@@ -117,7 +117,7 @@ class TableLoader {
   };
 
   ~TableLoader() {
-    table_close(rel_, RowExclusiveLock);
+    table_close(rel_, NoLock);
     free(in_functions);
     free(typioparams);
     ExecDropSingleTupleTableSlot(slot);

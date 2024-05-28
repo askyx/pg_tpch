@@ -232,7 +232,7 @@ Datum tpch_async_consum(PG_FUNCTION_ARGS) {
   if (cidx < 0 || cidx >= CONN_SIZE)
     elog(ERROR, "Connection out of bounds");
 
-  conn = remoteConnHash[cidx]->conn;
+  conn = remoteConnHash[cidx] ? remoteConnHash[cidx]->conn : NULL;
   if (!conn || remoteConnHash[cidx]->used == false)
     elog(ERROR, "Connection not found by index %d", cidx);
 
