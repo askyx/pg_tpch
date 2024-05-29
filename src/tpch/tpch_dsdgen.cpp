@@ -207,7 +207,7 @@ class TableLoader {
   Oid* typioparams;
   TupleTableSlot* slot;
   CommandId mycid = GetCurrentCommandId(true);
-  int ti_options = 0;
+  int ti_options = (TABLE_INSERT_SKIP_FSM | TABLE_INSERT_FROZEN | TABLE_INSERT_NO_LOGICAL);
 };
 
 std::string convert_money_str(DSS_HUGE cents) {

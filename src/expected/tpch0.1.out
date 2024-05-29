@@ -1,0 +1,17 @@
+select * from dbgen(0.1);
+   tab    | row_count 
+----------+-----------
+ region   |         5
+ nation   |        25
+ supplier |      1000
+ customer |     15000
+ part     |     20000
+ partsupp |     80000
+ orders   |    150000
+ lineitem |    600572
+(8 rows)
+
+-- select * from tpch;
+-- select * from tpch;
+-- select * from tpch(1,1,1);
+-- select * from tpch(2,2,2);

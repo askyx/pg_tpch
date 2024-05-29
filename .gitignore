@@ -15,7 +15,6 @@ build/
 
 # Executables
 *.exe
-*.out
 *.app
 
 # Generated files

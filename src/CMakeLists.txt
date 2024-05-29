@@ -5,7 +5,8 @@ add_postgresql_extension(
   pg_tpch
   VERSION 1.0
   SOURCES pg_tpch.cpp
-  SCRIPTS pg_tpch--1.0.sql)
+  SCRIPTS pg_tpch--1.0.sql
+  REGRESS tpch0.1 tpch0.5)
 
 target_link_libraries(pg_tpch tpch)
 

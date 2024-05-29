@@ -49,7 +49,7 @@ DECLARE
     num_children INT;
     query_text TEXT;
 BEGIN
-    cleanup_needed := tpch_cleanup(should_overwrite);
+    -- cleanup_needed := tpch_cleanup(should_overwrite);
 
     CREATE TEMP TABLE temp_cid_table(cid INT, c_name TEXT, c_status INT, c_child TEXT);
     CREATE TEMP TABLE temp_count_table(c_name TEXT, c_count INT);
@@ -66,26 +66,24 @@ BEGIN
         num_children := CEIL(rec.weight::NUMERIC / total_table_weight * host_core_count);
         FOR i IN 0..num_children - 1 LOOP
             query_text := format('SELECT * FROM dbgen_internal(%s, %L, %s, %s)', scale_factor, rec.table_name, num_children, i);
+            raise notice '%', query_text;
             INSERT INTO temp_cid_table SELECT cid, rec.table_name, rec.status, rec.child FROM tpch_async_submit(query_text);
         END LOOP;
     END LOOP;
-        
+
     FOR rec IN SELECT cid, c_name, c_status, c_child FROM temp_cid_table LOOP
         SELECT t1_count, t2_count INTO row_count_rec FROM tpch_async_consum(rec.cid);
         INSERT INTO temp_count_table VALUES(rec.c_name, row_count_rec.t1_count);
 
-        EXECUTE 'REINDEX TABLE ' || rec.c_name;
-        EXECUTE 'ANALYZE ' || rec.c_name;
         IF rec.c_status = 1 THEN
             INSERT INTO temp_count_table VALUES(rec.c_child, row_count_rec.t2_count);
-
-            EXECUTE 'REINDEX TABLE ' || rec.c_child;
-            EXECUTE 'ANALYZE ' || rec.c_child;
         END IF;
     END LOOP;
     FOR rec IN SELECT c_name, sum(c_count) as count FROM temp_count_table GROUP BY c_name order by 2 LOOP
         tab := rec.c_name;
         row_count := rec.count;
+        EXECUTE 'REINDEX TABLE ' || rec.c_name;
+        EXECUTE 'ANALYZE ' || rec.c_name;
         RETURN NEXT;
     END LOOP;
     DROP TABLE temp_cid_table;

@@ -2,29 +2,32 @@
 
 A plug-and-play postgres extension for testing tpch, inspired by [duckdb](https://github.com/duckdb/duckdb.git) and [hyrise](https://github.com/hyrise/hyrise.git), to avoid the cumbersome configuration in tpch. Only need to install the extension, and then you can run the test.
 
-### 亮点
+### Highlights
 
-- 基于PostgreSQL的TPC-H测试扩展，支持TPC-H的22个查询，并提供数据生成脚本。
-- 自动生成TPC-H数据集，并加载到PostgreSQL中。
-- 自动测试TPC-H的22个查询，并记录运行时间和结果。
-- 支持异步数据生成。
-
+- A TPC-H benchmark extension based on PostgreSQL, supporting all 22 TPC-H queries and providing data generation funciton.
+- Automatically generates TPC-H datasets and loads them into PostgreSQL.
+- Automatically runs and records the execution time and results of all 22 TPC-H queries.
+- Async load data set.
 
 ### REQUIREMENTS
 
 - PostgreSQL
     this is a extension of PostgreSQL, you need to install it first.
-- gcc 13 or higher
+- gcc 12 or higher
+- cmake
 
 ### SETUP
 
 make sure you have installed the postgres and the `pg_config` is in your PATH.
 
-```
+```shell
 git clone https://github.com/asky/pg_tpch.git
 cd pg_tpch
 cmake -Bbuild
+# install extension to postgres
 cmake --build build --target install
+# you can also run test
+cmake --build build --target test
 ```
 
 ### BASIC USAGE
@@ -68,22 +71,19 @@ cmake --build build --target install
 -- create extension pg_tpch;
 create extension pg_tpch;
 
--- generate data set for scale factor 0.1
-[local]:15432 asky@regress=# select * from dbgen(0.1);
+-- generate data set for scale factor 1
+postgres=# select * from dbgen(1);
    tab    | row_count
 ----------+-----------
- customer |     15000
- nation   |        25
- orders   |    150000
- lineitem |    600572
- part     |     20000
- partsupp |     80000
  region   |         5
- supplier |      1000
+ nation   |        25
+ supplier |     10000
+ customer |    150000
+ part     |    200000
+ partsupp |    800000
+ orders   |   1500000
+ lineitem |   6001215
 (8 rows)
-
--- analyze tables
-analyze;
 
 -- run all 22 queries, you can get detail result like following,
 [local]:15432 asky@regress=# select * from tpch;
@@ -140,7 +140,8 @@ select query from tpch_queries(1); \gset
 :query
 
 -- or cleanup all tables
-select tpch_cleanup();
+-- if parameter is true, will also clean up statistics
+select tpch_cleanup(true);
 
 -- and regenerated data set for other scale factor 
 select dbgen(2);
@@ -160,7 +161,6 @@ drop extension pg_tpch;
 
 ### TODO
 
-- [ ] check query result correctness
-- [ ] support postgres 12 or higher
-- [ ] async dbgen, need provide a async function to generate data set, or use dblink
-    - Avoid relying on other extensions, we can do it ourselves.
+- batch insert for data generation
+- parallel reindex and analyze
+  * dbgen 10 is `Time: 369922.457 ms (06:09.922)`
