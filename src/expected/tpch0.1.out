@@ -1,3 +1,9 @@
+select * from tpch_cleanup();
+ tpch_cleanup 
+--------------
+ t
+(1 row)
+
 select * from dbgen(0.1);
    tab    | row_count 
 ----------+-----------
@@ -15,3 +21,51 @@ select * from dbgen(0.1);
 -- select * from tpch;
 -- select * from tpch(1,1,1);
 -- select * from tpch(2,2,2);
+select count(*) from  customer;
+ count 
+-------
+ 15000
+(1 row)
+
+select count(*) from  lineitem;
+ count  
+--------
+ 600572
+(1 row)
+
+select count(*) from  nation;
+ count 
+-------
+    25
+(1 row)
+
+select count(*) from  orders;
+ count  
+--------
+ 150000
+(1 row)
+
+select count(*) from  part;
+ count 
+-------
+ 20000
+(1 row)
+
+select count(*) from  partsupp;
+ count 
+-------
+ 80000
+(1 row)
+
+select count(*) from  region;
+ count 
+-------
+     5
+(1 row)
+
+select count(*) from  supplier;
+ count 
+-------
+  1000
+(1 row)
+

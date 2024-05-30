@@ -36,10 +36,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE FUNCTION dbgen(
-  scale_factor DOUBLE PRECISION,
-  should_overwrite BOOLEAN DEFAULT TRUE
-) RETURNS TABLE(tab TEXT, row_count INT) AS $$
+CREATE FUNCTION dbgen(scale_factor DOUBLE PRECISION) RETURNS TABLE(tab TEXT, row_count INT) AS $$
 DECLARE
     rec RECORD;
     row_count_rec RECORD;
@@ -49,7 +46,6 @@ DECLARE
     num_children INT;
     query_text TEXT;
 BEGIN
-    -- cleanup_needed := tpch_cleanup(should_overwrite);
 
     CREATE TEMP TABLE temp_cid_table(cid INT, c_name TEXT, c_status INT, c_child TEXT);
     CREATE TEMP TABLE temp_count_table(c_name TEXT, c_count INT);
@@ -66,7 +62,6 @@ BEGIN
         num_children := CEIL(rec.weight::NUMERIC / total_table_weight * host_core_count);
         FOR i IN 0..num_children - 1 LOOP
             query_text := format('SELECT * FROM dbgen_internal(%s, %L, %s, %s)', scale_factor, rec.table_name, num_children, i);
-            raise notice '%', query_text;
             INSERT INTO temp_cid_table SELECT cid, rec.table_name, rec.status, rec.child FROM tpch_async_submit(query_text);
         END LOOP;
     END LOOP;
