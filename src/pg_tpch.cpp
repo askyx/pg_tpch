@@ -1,4 +1,6 @@
 
+#include <cstddef>
+#include <exception>
 extern "C" {
 #include <postgres.h>
 #include <fmgr.h>
@@ -12,6 +14,7 @@ extern "C" {
 #include <libpq/libpq-be.h>
 #include <libpq/pqformat.h>
 #include <miscadmin.h>
+#include <postmaster/bgworker.h>
 #include <postmaster/postmaster.h>
 #include <utils/builtins.h>
 #include <utils/wait_event.h>
@@ -46,11 +49,9 @@ static int tpch_num_queries() {
   return tpch::TPCHWrapper::QueriesCount();
 }
 
-static void dbgen_internal(double scale_factor, char* table, int children, int step, int* count1, int* count2) {
+static void dbgen_internal(double scale_factor) {
   try {
-    auto count = tpch::TPCHWrapper::DBGen(scale_factor, table, children, step);
-    *count1 = count.first;
-    *count2 = count.second;
+    tpch::TPCHWrapper::DBGen(scale_factor);
   } catch (const std::exception& e) {
     elog(ERROR, "TPC-DS Failed to dsdgen, get error: %s", e.what());
   }
@@ -67,14 +68,6 @@ static tpch_runner_result* tpch_runner(int qid) {
 }  // namespace tpch
 
 extern "C" {
-
-struct PGconnArray {
-  PGconn* conn;
-  bool used;
-};
-
-static PGconnArray** remoteConnHash = NULL;
-static int CONN_SIZE = 32;
 
 PG_MODULE_MAGIC;
 
@@ -138,169 +131,33 @@ Datum tpch_runner(PG_FUNCTION_ARGS) {
   PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
 }
 
-PG_FUNCTION_INFO_V1(dbgen_internal);
+/*
+sf=1的时候，表数量级如下:
+ region   |         5     : 数量固定
+ nation   |        25     : 数量固定
+ supplier |     10000     : 基数为10000，大小随sf变化
+ customer |    150000     : 基数为150000，大小随sf变化
+ part     |    200000     : 基数为200000，大小随sf变化
+ partsupp |    800000     : 和part为一比四的关系
+ orders   |   1500000     : 基数为1500000，大小随sf变化
+ lineitem |   6001215     : 和orders为一比四的关系
 
+ 任务划分：
+  小表不切分，大表按照数据量切分，part和order一比七的关系，最低使用 4 + 1 + 7 = 12 个 worker
+
+ 实际调度的时候受到max_parallel_workers的限制，轮询消费，等待空闲
+
+ 如果 max_parallel_workers 足够大，则可以多分几个
+  简单使用 max(1, max_parallel_workers / 8) 为 part和order 的系数
+
+*/
+
+PG_FUNCTION_INFO_V1(dbgen_internal);
 Datum dbgen_internal(PG_FUNCTION_ARGS) {
   double sf = PG_GETARG_FLOAT8(0);
-  char* table = text_to_cstring(PG_GETARG_TEXT_PP(1));
-  int children = PG_GETARG_INT32(2);
-  int step = PG_GETARG_INT32(3);
-  int count1 = 0;
-  int count2 = 0;
 
-  TupleDesc tupdesc;
-  Datum values[2];
-  bool nulls[2] = {false, false};
+  tpch::dbgen_internal(sf);
 
-  if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
-    elog(ERROR, "return type must be a row type");
-
-  tpch::dbgen_internal(sf, table, children, step, &count1, &count2);
-
-  values[0] = count1;
-  values[1] = count2;
-
-  PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
-}
-
-static PGconn* doConnect(void) {
-  PGconn* conn;
-
-  char connstr[1024];
-  snprintf(connstr, sizeof(connstr), "dbname='%s' port=%d", get_database_name(MyDatabaseId), PostPortNumber);
-
-  conn = libpqsrv_connect(connstr, PG_WAIT_EXTENSION);
-
-  /* check to see that the backend connection was successfully made */
-  if (PQstatus(conn) == CONNECTION_BAD) {
-    ereport(ERROR, (errcode(ERRCODE_DUPLICATE_OBJECT), errmsg("%s", PQerrorMessage(conn))));
-    PQfinish(conn);
-    return NULL;
-  }
-
-  return conn;
-}
-
-PG_FUNCTION_INFO_V1(tpch_async_submit);
-
-/*
- just use for async dbgen, so use a array to keep conn samply
- */
-Datum tpch_async_submit(PG_FUNCTION_ARGS) {
-  char* sql = text_to_cstring(PG_GETARG_TEXT_PP(0));
-  PGconn* conn = NULL;
-  int retval;
-  int i = 0;
-
-  if (!remoteConnHash)
-    remoteConnHash = (PGconnArray**)MemoryContextAllocZero(TopMemoryContext, sizeof(PGconnArray*) * CONN_SIZE);
-
-  conn = doConnect();
-
-  retval = PQsendQuery(conn, sql);
-  if (retval != 1) {
-    char* errmsg = pchomp(PQerrorMessage(conn));
-    libpqsrv_disconnect(conn);
-    elog(ERROR, "could not send query cause: %s", errmsg);
-  }
-  while (remoteConnHash[i] && remoteConnHash[i]->used) {
-    i++;
-  }
-
-  if (i >= CONN_SIZE)
-    elog(ERROR, "could not create new connection, too many connections");
-
-  if (!remoteConnHash[i])
-    remoteConnHash[i] = (PGconnArray*)MemoryContextAllocZero(TopMemoryContext, sizeof(PGconnArray));
-
-  remoteConnHash[i]->conn = conn;
-  remoteConnHash[i]->used = true;
-
-  PG_RETURN_INT32(i);
-}
-
-PG_FUNCTION_INFO_V1(tpch_async_consum);
-
-static char* xpstrdup(const char* in) {
-  if (in == NULL)
-    return NULL;
-  return pstrdup(in);
-}
-
-Datum tpch_async_consum(PG_FUNCTION_ARGS) {
-  int cidx = PG_GETARG_INT32(0);
-  PGconn* conn = NULL;
-
-  if (cidx < 0 || cidx >= CONN_SIZE)
-    elog(ERROR, "Connection out of bounds");
-
-  conn = remoteConnHash[cidx] ? remoteConnHash[cidx]->conn : NULL;
-  if (!conn || remoteConnHash[cidx]->used == false)
-    elog(ERROR, "Connection not found by index %d", cidx);
-
-  PGresult* res = PQgetResult(conn);
-  if (res) {
-    if (PQresultStatus(res) != PGRES_TUPLES_OK) {
-      int sqlstate;
-      char* message_primary;
-      char* message_detail;
-      char* message_hint;
-      char* message_context;
-      char* pg_diag_sqlstate = PQresultErrorField(res, PG_DIAG_SQLSTATE);
-      char* pg_diag_message_primary = PQresultErrorField(res, PG_DIAG_MESSAGE_PRIMARY);
-      char* pg_diag_message_detail = PQresultErrorField(res, PG_DIAG_MESSAGE_DETAIL);
-      char* pg_diag_message_hint = PQresultErrorField(res, PG_DIAG_MESSAGE_HINT);
-      char* pg_diag_context = PQresultErrorField(res, PG_DIAG_CONTEXT);
-
-      if (pg_diag_sqlstate)
-        sqlstate = MAKE_SQLSTATE(pg_diag_sqlstate[0], pg_diag_sqlstate[1], pg_diag_sqlstate[2], pg_diag_sqlstate[3],
-                                 pg_diag_sqlstate[4]);
-      else
-        sqlstate = ERRCODE_CONNECTION_FAILURE;
-
-      message_primary = xpstrdup(pg_diag_message_primary);
-      message_detail = xpstrdup(pg_diag_message_detail);
-      message_hint = xpstrdup(pg_diag_message_hint);
-      message_context = xpstrdup(pg_diag_context);
-
-      if (message_primary == NULL)
-        message_primary = pchomp(PQerrorMessage(conn));
-      PQclear(res);
-
-      libpqsrv_disconnect(conn);
-      remoteConnHash[cidx]->conn = NULL;
-      remoteConnHash[cidx]->used = false;
-
-      ereport(ERROR, (errcode(sqlstate),
-                      (message_primary != NULL && message_primary[0] != '\0')
-                          ? errmsg_internal("%s", message_primary)
-                          : errmsg("could not obtain message string for remote error"),
-                      message_detail ? errdetail_internal("%s", message_detail) : 0,
-                      message_hint ? errhint("%s", message_hint) : 0,
-                      message_context ? (errcontext("%s", message_context)) : 0));
-      /* ? how to free memory safely?, ereport(ERROR will jump direct, use a new memctx*/
-      pfree(message_primary);
-      pfree(message_detail);
-      pfree(message_hint);
-      pfree(message_context);
-    } else {
-      TupleDesc tupdesc;
-      Datum values[2];
-      bool nulls[2] = {false, false};
-      if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
-        elog(ERROR, "return type must be a row type");
-
-      values[0] = Int32GetDatum(pg_strtoint32(PQgetvalue(res, 0, 0)));
-      values[1] = Int32GetDatum(pg_strtoint32(PQgetvalue(res, 0, 1)));
-
-      libpqsrv_disconnect(conn);
-      remoteConnHash[cidx]->conn = NULL;
-      remoteConnHash[cidx]->used = false;
-
-      PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
-    }
-  }
-  elog(ERROR, "unexpected error for tpch_async_consum");
-  return 0;
+  return BoolGetDatum(true);
 }
 }

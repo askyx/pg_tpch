@@ -1,27 +1,35 @@
+#include "dss.h"
 #define ENABLE_NLS
 
 extern "C" {
 #include <postgres.h>
 
+#include <access/parallel.h>
 #include <executor/spi.h>
 #include <lib/stringinfo.h>
 #include <libpq/pqformat.h>
 #include <miscadmin.h>
+#include <postmaster/bgworker.h>
 #include <utils/builtins.h>
+#include <utils/palloc.h>
+
+#include "port.h"
 }
 #include <algorithm>
 #include <cassert>
-#include <exception>
 #include <filesystem>
 #include <format>
 #include <fstream>
-#include <ranges>
 #include <stdexcept>
+#include <vector>
 
 #include "tpch_constants.hpp"
 #include "tpch_dsdgen.h"
 #include "tpch_wrapper.hpp"
 
+extern "C" {
+PGDLLEXPORT void load_data_impl(dsm_segment *seg, shm_toc *toc);
+}
 namespace tpch {
 
 static auto get_extension_external_directory(void) {
@@ -128,32 +136,138 @@ tpch_runner_result *TPCHWrapper::RunTPCH(int qid) {
     throw std::runtime_error(std::format("Queries file for qid: {} does not exist", qid));
 }
 
-std::pair<int, int> TPCHWrapper::DBGen(double scale, char *table, int children, int step) {
-  if (step >= children)
-    return {0, 0};
+struct TableInfo {
+  Oid dboid{MyDatabaseId};
+  Oid roleoid{GetCurrentRoleId()};
+  int table_id;
+  int worker_count;
+  int current_worker{0};
 
-  const std::filesystem::path extension_dir = get_extension_external_directory();
+  // 序列化函数
+  void serialize(char *buffer) {
+    char *ptr = buffer;
 
-#define CALL_GENTBL(tbl, tbl_id, fuc)                                                  \
-  if (strcasecmp(table, #tbl) == 0) {                                                  \
-    TPCHTableGenerator generator(scale, table, tbl_id, children, step, extension_dir); \
-    return generator.fuc();                                                            \
+    *(reinterpret_cast<Oid *>(ptr)) = dboid;
+    ptr += sizeof(Oid);
+    *(reinterpret_cast<Oid *>(ptr)) = roleoid;
+    ptr += sizeof(Oid);
+
+    *(reinterpret_cast<int *>(ptr)) = table_id;
+    ptr += sizeof(int);
+
+    *(reinterpret_cast<int *>(ptr)) = worker_count;
+    ptr += sizeof(int);
+
+    *(reinterpret_cast<int *>(ptr)) = current_worker;
+    ptr += sizeof(int);
   }
 
-  CALL_GENTBL(customer, CUST, generate_customer)
-  CALL_GENTBL(nation, NATION, generate_nation)
-  CALL_GENTBL(region, REGION, generate_region)
-  CALL_GENTBL(supplier, SUPP, generate_supplier)
-  CALL_GENTBL(orders, ORDER_LINE, generate_orders_and_lineitem)
-  CALL_GENTBL(part, PART_PSUPP, generate_part_and_partsupp)
+  void deserialize(const char *buffer) {
+    const char *ptr = buffer;
 
-#undef CALL_GENTBL
+    dboid = *reinterpret_cast<const Oid *>(ptr);
+    ptr += sizeof(Oid);
+    roleoid = *reinterpret_cast<const Oid *>(ptr);
+    ptr += sizeof(Oid);
+    table_id = *reinterpret_cast<const int *>(ptr);
+    ptr += sizeof(int);
+    worker_count = *reinterpret_cast<const int *>(ptr);
+    ptr += sizeof(int);
+    current_worker = *reinterpret_cast<const int *>(ptr);
+    ptr += sizeof(int);
+  }
+};
 
-  if (strcasecmp(table, "lineitem") || strcasecmp(table, "partsupp"))
-    throw std::runtime_error(
-        std::format("Table {} is a child; it is populated during the build of its parent", "lineitem"));
+void TPCHWrapper::DBGen(double scale) {
+  const std::filesystem::path extension_dir = get_extension_external_directory();
 
-  throw std::runtime_error(std::format("Table {} does not exist", table));
+  // 8 is 1 part + 7 orders
+  auto worker_factor = std::min(1, (int)(max_worker_processes / 8));
+
+  std::vector<TableInfo> table_info{{.table_id = REGION, .worker_count = 1},
+                                    {.table_id = NATION, .worker_count = 1},
+                                    {.table_id = SUPP, .worker_count = 1},
+                                    {.table_id = CUST, .worker_count = 1},
+                                    {.table_id = PART_PSUPP, .worker_count = 1 * worker_factor},
+                                    {.table_id = ORDER_LINE, .worker_count = 7 * worker_factor}};
+
+  auto worker_count = 4 + (1 + 7) * worker_factor;
+
+  EnterParallelMode();
+  auto *pcxt = CreateParallelContext("pg_tpch", "load_data_impl", 1);
+
+  auto *snapshot = RegisterSnapshot(GetTransactionSnapshot());
+
+  InitializeParallelDSM(pcxt);
+
+  if (pcxt->seg == NULL) {
+    if (IsMVCCSnapshot(snapshot))
+      UnregisterSnapshot(snapshot);
+    DestroyParallelContext(pcxt);
+    ExitParallelMode();
+    throw std::runtime_error("Failed to create parallel context");
+  }
+
+  LaunchParallelWorkers(pcxt);
+
+  WaitForParallelWorkersToAttach(pcxt);
+
+  // BackgroundWorker worker;
+
+  // memset(&worker, 0, sizeof(worker));
+  // worker.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
+  // worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
+  // worker.bgw_restart_time = BGW_NEVER_RESTART;
+  // sprintf(worker.bgw_library_name, "pg_tpch");
+  // sprintf(worker.bgw_function_name, "load_data_impl");
+  // snprintf(worker.bgw_name, BGW_MAXLEN, "pg_tpch dynamic worker");
+  // snprintf(worker.bgw_type, BGW_MAXLEN, "pg_tpch dynamic");
+  // /* set bgw_notify_pid so that we can use WaitForBackgroundWorkerStartup */
+  // worker.bgw_notify_pid = MyProcPid;
+  // worker.bgw_main_arg = Float8GetDatum(scale);
+
+  // std::vector<BackgroundWorkerHandle *> handles(1, nullptr);
+  // int i = 0;
+  // for (auto &t : table_info) {
+  //   for (auto j = 0; j < t.worker_count; ++j) {
+  //     t.current_worker = j;
+  //     t.serialize(worker.bgw_extra);
+  //     if (!RegisterDynamicBackgroundWorker(&worker, &handles[i])) {
+  //       --j;
+  //       pg_usleep(1000 * 500);  // wait for 500ms before retrying
+  //     } else
+  //       i++;
+  //   }
+  // }
+
+  // for (auto *bgwhandle : handles)
+  //   WaitForBackgroundWorkerShutdown(bgwhandle);
+
 }  // namespace tpch
 
 }  // namespace tpch
+
+extern "C" {
+void load_data_impl(dsm_segment *seg, shm_toc *toc) {
+  // tpch::TableInfo table_info;
+  // table_info.deserialize(MyBgworkerEntry->bgw_extra);
+
+  // elog(LOG, "Start loading data for table %d, worker %d", table_info.table_id, table_info.current_worker);
+
+  tpch::TPCHTableGenerator generator(1, ORDER_LINE, 7, 0);
+  // if (table_info.table_id == PART_PSUPP)
+  //   generator.generate_part_and_partsupp();
+  // else if (table_info.table_id == ORDER_LINE)
+    generator.generate_orders_and_lineitem();
+  // else if (table_info.table_id == CUST)
+  //   generator.generate_customer();
+  // else if (table_info.table_id == SUPP)
+  //   generator.generate_supplier();
+  // else if (table_info.table_id == NATION)
+  //   generator.generate_nation();
+  // else if (table_info.table_id == REGION)
+  //   generator.generate_region();
+  // else
+  //   elog(ERROR, "Unsupported table name: %d", table_info.table_id);
+}
+}

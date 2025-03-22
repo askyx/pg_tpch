@@ -1,25 +1,15 @@
-#include <algorithm>
-#include <chrono>
 #include <climits>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
-#include <filesystem>
 #include <format>
-#include <iostream>
-#include <limits>
-#include <memory>
-#include <optional>
 #include <string>
-#include <unordered_map>
 #include <utility>
-#include <vector>
 
 #define DECLARER
 
 #include "dbgen_gunk.hpp"
-#include "tpch_constants.hpp"
 #include "tpch_dsdgen.h"
 
 extern "C" {
@@ -74,9 +64,8 @@ void skip(int table, int children, DSS_HUGE step, DBGenContext& dbgen_ctx) {
   }
 }
 
-TPCHTableGenerator::TPCHTableGenerator(double scale_factor, const std::string& table, int table_id, int children,
-                                       int step, std::filesystem::path resource_dir, int rng_seed)
-    : table_{std::move(table)}, table_id_{table_id} {
+TPCHTableGenerator::TPCHTableGenerator(double scale_factor, int table_id, int children, int step, int rng_seed)
+    : table_id_{table_id} {
   tdef* tdefs = ctx_.tdefs;
   tdefs[PART].base = 200000;
   tdefs[PSUPP].base = 200000;
@@ -132,7 +121,7 @@ class TableLoader {
  public:
   TableLoader(const std::string& table) : table_{std::move(table)} {
     reloid_ = DirectFunctionCall1(regclassin, CStringGetDatum(table_.c_str()));
-    rel_ = try_table_open(reloid_, NoLock);
+    rel_ = table_open(reloid_, NoLock);
     if (!rel_)
       throw std::runtime_error("try_table_open Failed");
 
@@ -187,7 +176,8 @@ class TableLoader {
     ExecStoreVirtualTuple(slot);
 
     table_tuple_insert(rel_, slot, mycid, ti_options, NULL);
-    // reindex ？
+    // TODO: insert into index, temporary by reindex
+    // TODO: multiinsert buffer
     // if (rel_->ri_NumIndices > 0)
     //   recheckIndexes = ExecInsertIndexTuples(rel_, myslot, estate, false, false, NULL, NIL, false);
 
@@ -223,7 +213,7 @@ std::string convert_str(auto date) {
 }
 
 std::pair<int, int> TPCHTableGenerator::generate_customer() {
-  TableLoader loader(table_);
+  TableLoader loader("customer");
 
   customer_t customer{};
   for (auto row_idx = part_offset_; rowcnt_; rowcnt_--, row_idx++) {
@@ -313,7 +303,7 @@ std::pair<int, int> TPCHTableGenerator::generate_orders_and_lineitem() {
 }
 
 std::pair<int, int> TPCHTableGenerator::generate_nation() {
-  TableLoader loader(table_);
+  TableLoader loader("nation");
 
   code_t nation{};
   for (auto nation_idx = part_offset_; rowcnt_; rowcnt_--, ++nation_idx) {
@@ -359,7 +349,7 @@ std::pair<int, int> TPCHTableGenerator::generate_part_and_partsupp() {
 }
 
 std::pair<int, int> TPCHTableGenerator::generate_region() {
-  TableLoader loader(table_);
+  TableLoader loader("region");
 
   code_t region{};
   for (auto region_idx = part_offset_; rowcnt_; rowcnt_--, ++region_idx) {
@@ -371,7 +361,7 @@ std::pair<int, int> TPCHTableGenerator::generate_region() {
 }
 
 std::pair<int, int> TPCHTableGenerator::generate_supplier() {
-  TableLoader loader(table_);
+  TableLoader loader("supplier");
 
   supplier_t supplier{};
   for (auto supplier_idx = part_offset_; rowcnt_; rowcnt_--, ++supplier_idx) {
