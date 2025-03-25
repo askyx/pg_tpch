@@ -88,7 +88,7 @@ uint32_t TPCHWrapper::QueriesCount() {
 
 const char *TPCHWrapper::GetQuery(int query) {
   if (query <= 0 || query > TPCH_QUERIES_COUNT) {
-    throw std::runtime_error(std::format("Out of range TPC-DS query number {}", query));
+    throw std::runtime_error(std::format("Out of range TPC-H query number {}", query));
   }
 
   const std::filesystem::path extension_dir = get_extension_external_directory();
@@ -105,7 +105,7 @@ const char *TPCHWrapper::GetQuery(int query) {
 
 tpch_runner_result *TPCHWrapper::RunTPCH(int qid) {
   if (qid < 0 || qid > TPCH_QUERIES_COUNT) {
-    throw std::runtime_error(std::format("Out of range TPC-DS query number {}", qid));
+    throw std::runtime_error(std::format("Out of range TPC-H query number {}", qid));
   }
 
   const std::filesystem::path extension_dir = get_extension_external_directory();

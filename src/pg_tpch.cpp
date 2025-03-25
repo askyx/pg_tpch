@@ -29,7 +29,7 @@ static bool tpch_prepare() {
   try {
     tpch::TPCHWrapper::CreateTPCHSchema();
   } catch (const std::exception& e) {
-    elog(ERROR, "TPC-DS Failed to prepare schema, get error: %s", e.what());
+    elog(ERROR, "TPC-H Failed to prepare schema, get error: %s", e.what());
   }
   return true;
 }
@@ -38,7 +38,7 @@ static const char* tpch_queries(int qid) {
   try {
     return tpch::TPCHWrapper::GetQuery(qid);
   } catch (const std::exception& e) {
-    elog(ERROR, "TPC-DS Failed to get query, get error: %s", e.what());
+    elog(ERROR, "TPC-H Failed to get query, get error: %s", e.what());
   }
 }
 
@@ -52,7 +52,7 @@ static void dbgen_internal(double scale_factor, char* table, int children, int s
     *count1 = count.first;
     *count2 = count.second;
   } catch (const std::exception& e) {
-    elog(ERROR, "TPC-DS Failed to dsdgen, get error: %s", e.what());
+    elog(ERROR, "TPC-H Failed to dsdgen, get error: %s", e.what());
   }
 }
 
@@ -60,7 +60,7 @@ static tpch_runner_result* tpch_runner(int qid) {
   try {
     return tpch::TPCHWrapper::RunTPCH(qid);
   } catch (const std::exception& e) {
-    elog(ERROR, "TPC-DS Failed to run query, get error: %s", e.what());
+    elog(ERROR, "TPC-H Failed to run query, get error: %s", e.what());
   }
 }
 

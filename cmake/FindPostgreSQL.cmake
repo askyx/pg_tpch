@@ -277,35 +277,26 @@ $<$<NOT:$<BOOL:${_ext_REQUIRES}>>:#>requires = '$<JOIN:${_ext_REQUIRES},$<COMMA>
   install(FILES ${_control_file} ${_script_files}
           DESTINATION ${PostgreSQL_EXTENSION_DIR})
 
-  if(_ext_REGRESS)
-    foreach(_test ${_ext_REGRESS})
-      set(_sql_file "${CMAKE_CURRENT_SOURCE_DIR}/sql/${_test}.sql")
-      set(_out_file "${CMAKE_CURRENT_SOURCE_DIR}/expected/${_test}.out")
-      if(NOT EXISTS "${_sql_file}")
-        message(FATAL_ERROR "Test file '${_sql_file}' does not exist!")
-      endif()
-      if(NOT EXISTS "${_out_file}")
-        file(WRITE "${_out_file}" )
-        message(STATUS "Created empty file ${_out_file}")
-      endif()
-    endforeach()
-
-    if(PG_REGRESS)
+  if(PG_REGRESS)
+    set(TEST_DIR ${CMAKE_CURRENT_SOURCE_DIR}/test/regress)
+    set(TEST_SCHEDULE ${TEST_DIR}/schedule)
+    set(TEST_CONFIG ${TEST_DIR}/regression.conf)
+      
+    if(NOT EXISTS ${TEST_SCHEDULE})
+      # TODO: scan all test files and create a default schedule.
+      message(STATUS "Schedule file ${TEST_SCHEDULE} does not exist, using default schedule")
+    else()
+      message(STATUS "Test using schedule file ${TEST_SCHEDULE}")
       add_test(
         NAME ${NAME}
         COMMAND
           ${PG_REGRESS} --temp-instance=${CMAKE_BINARY_DIR}/tmp_check
-          --inputdir=${CMAKE_CURRENT_SOURCE_DIR}
-          --outputdir=${CMAKE_CURRENT_BINARY_DIR} --load-extension=${NAME}
-          ${_ext_REGRESS})
+          --temp-config=${TEST_CONFIG}
+          --inputdir=${TEST_DIR}
+          --outputdir=${CMAKE_CURRENT_BINARY_DIR}/test --load-extension=${NAME}
+          --schedule ${TEST_SCHEDULE}
+      )
     endif()
-
-    add_custom_target(
-      ${NAME}_update_results
-      COMMAND
-        ${CMAKE_COMMAND} -E copy_if_different
-        ${CMAKE_CURRENT_BINARY_DIR}/results/*.out
-        ${CMAKE_CURRENT_SOURCE_DIR}/expected)
   endif()
 endfunction()
 

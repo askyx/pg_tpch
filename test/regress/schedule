@@ -1,0 +1,4 @@
+
+test: tpch0.01
+test: tpch0.02
+test: tpch0.03

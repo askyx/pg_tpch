@@ -66,7 +66,7 @@ BEGIN
         num_children := CEIL(rec.weight::NUMERIC / total_table_weight * host_core_count);
         FOR i IN 0..num_children - 1 LOOP
             query_text := format('SELECT * FROM dbgen_internal(%s, %L, %s, %s)', scale_factor, rec.table_name, num_children, i);
-            raise notice '%', query_text;
+            -- raise notice '%', query_text;
             INSERT INTO temp_cid_table SELECT cid, rec.table_name, rec.status, rec.child FROM tpch_async_submit(query_text);
         END LOOP;
     END LOOP;

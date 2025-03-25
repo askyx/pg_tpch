@@ -1,0 +1,23 @@
+select tpch_cleanup();
+ tpch_cleanup 
+--------------
+ t
+(1 row)
+
+select * from dbgen(0.01);
+   tab    | row_count 
+----------+-----------
+ region   |         5
+ nation   |        25
+ supplier |       100
+ customer |      1500
+ part     |      2000
+ partsupp |      8000
+ orders   |     15000
+ lineitem |     60175
+(8 rows)
+
+-- select * from tpch;
+-- select * from tpch;
+-- select * from tpch(1,1,1);
+-- select * from tpch(2,2,2);

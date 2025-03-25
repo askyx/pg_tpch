@@ -1,6 +1,7 @@
+select tpch_cleanup();
+select * from dbgen(0.01);
 
 
-select * from dbgen(0.5);
 -- select * from tpch;
 -- select * from tpch;
 -- select * from tpch(1,1,1);
