@@ -66,7 +66,7 @@ file(APPEND
   "update tpch.tpch_host_info set host_core = ${core_num};\n")
 
 set(TPCH_CURR_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/tpch)
-set(TPCH_INSTALL_DIR ${PostgreSQL_EXTENSION_DIR}/src/tpch)
+set(TPCH_INSTALL_DIR ${PostgreSQL_EXTENSION_DIR}/tpch)
 
 install(
   DIRECTORY
