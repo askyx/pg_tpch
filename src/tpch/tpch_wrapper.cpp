@@ -11,11 +11,9 @@ extern "C" {
 }
 #include <algorithm>
 #include <cassert>
-#include <exception>
 #include <filesystem>
 #include <format>
 #include <fstream>
-#include <ranges>
 #include <stdexcept>
 
 #include "tpch_constants.hpp"
@@ -144,14 +142,12 @@ std::pair<int, int> TPCHWrapper::DBGen(double scale, char *table, int children, 
   CALL_GENTBL(nation, NATION, generate_nation)
   CALL_GENTBL(region, REGION, generate_region)
   CALL_GENTBL(supplier, SUPP, generate_supplier)
-  CALL_GENTBL(orders, ORDER_LINE, generate_orders_and_lineitem)
-  CALL_GENTBL(part, PART_PSUPP, generate_part_and_partsupp)
+  CALL_GENTBL(lineitem, LINE, generate_lineitem)
+  CALL_GENTBL(orders, ORDER, generate_orders)
+  CALL_GENTBL(part, PART, generate_part)
+  CALL_GENTBL(partsupp, PSUPP, generate_partsupp)
 
 #undef CALL_GENTBL
-
-  if (strcasecmp(table, "lineitem") || strcasecmp(table, "partsupp"))
-    throw std::runtime_error(
-        std::format("Table {} is a child; it is populated during the build of its parent", "lineitem"));
 
   throw std::runtime_error(std::format("Table {} does not exist", table));
 }  // namespace tpch

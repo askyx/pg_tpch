@@ -1,5 +1,3 @@
-#include <algorithm>
-#include <chrono>
 #include <climits>
 #include <cmath>
 #include <cstddef>
@@ -7,19 +5,12 @@
 #include <cstdio>
 #include <filesystem>
 #include <format>
-#include <iostream>
-#include <limits>
-#include <memory>
-#include <optional>
 #include <string>
-#include <unordered_map>
 #include <utility>
-#include <vector>
 
 #define DECLARER
 
 #include "dbgen_gunk.hpp"
-#include "tpch_constants.hpp"
 #include "tpch_dsdgen.h"
 
 extern "C" {
@@ -64,10 +55,14 @@ void skip(int table, int children, DSS_HUGE step, DBGenContext& dbgen_ctx) {
       sd_region(children, step, &dbgen_ctx);
       break;
     case ORDER_LINE:
+    case LINE:
+    case ORDER:
       sd_line(children, step, &dbgen_ctx);
       sd_order(children, step, &dbgen_ctx);
       break;
     case PART_PSUPP:
+    case PART:
+    case PSUPP:
       sd_part(children, step, &dbgen_ctx);
       sd_psupp(children, step, &dbgen_ctx);
       break;
@@ -244,22 +239,13 @@ std::pair<int, int> TPCHTableGenerator::generate_customer() {
   return {loader.row_count(), 0};
 }
 
-std::pair<int, int> TPCHTableGenerator::generate_orders_and_lineitem() {
+std::pair<int, int> TPCHTableGenerator::generate_orders() {
   TableLoader order_loader("orders");
-  TableLoader lineitem_loader("lineitem");
 
   order_t order{};
-  // auto start = std::chrono::high_resolution_clock::now();
-  // std::chrono::duration<double> o_elapsed_time = std::chrono::duration<double>::zero();
-  // std::chrono::duration<double> o_elapsed_time1 = std::chrono::duration<double>::zero();
-  // std::chrono::duration<double> o_elapsed_time2 = std::chrono::duration<double>::zero();
   for (auto order_idx = part_offset_; rowcnt_; rowcnt_--, ++order_idx) {
-    // auto o_start = std::chrono::high_resolution_clock::now();
     call_dbgen_mk<order_t>(order_idx + 1, order, mk_order, ORDER_LINE, &ctx_, 0l);
-    // auto o_end = std::chrono::high_resolution_clock::now();
-    // o_elapsed_time += (o_end - o_start);
 
-    // auto o_start1 = std::chrono::high_resolution_clock::now();
     order_loader.start()
         .addItem(order.okey)
         .addItem(order.custkey)
@@ -271,10 +257,17 @@ std::pair<int, int> TPCHTableGenerator::generate_orders_and_lineitem() {
         .addItem(order.spriority)
         .addItem(order.comment)
         .end();
-    // auto o_end1 = std::chrono::high_resolution_clock::now();
-    // o_elapsed_time1 += (o_end1 - o_start1);
+  }
+  return {order_loader.row_count(), 0};
+}
 
-    // auto o_start2 = std::chrono::high_resolution_clock::now();
+std::pair<int, int> TPCHTableGenerator::generate_lineitem() {
+  TableLoader lineitem_loader("lineitem");
+
+  order_t order{};
+  for (auto order_idx = part_offset_; rowcnt_; rowcnt_--, ++order_idx) {
+    call_dbgen_mk<order_t>(order_idx + 1, order, mk_lineitem, ORDER_LINE, &ctx_, 0l);
+
     for (auto line_idx = int64_t{0}; line_idx < order.lines; ++line_idx) {
       const auto& lineitem = order.l[line_idx];
 
@@ -297,19 +290,8 @@ std::pair<int, int> TPCHTableGenerator::generate_orders_and_lineitem() {
           .addItem(lineitem.comment)
           .end();
     }
-    // auto o_end2 = std::chrono::high_resolution_clock::now();
-    // o_elapsed_time2 += (o_end2 - o_start2);
   }
-  /*
-    auto end = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double> elapsed_time = end - start;
-    整个循环执行时间: 50.3691 秒 order:2.89651 秒 xx1:5.08051 秒 xx2:42.0685 秒
-    lineitem de 耗时最久，需要加入 批量 insert 操作，当前先实现 并行任务的分割
-    std::cout << "整个循环执行时间: " << elapsed_time.count() << " 秒" << " order:" << o_elapsed_time.count() << " 秒"
-              << " xx1:" << o_elapsed_time1.count() << " 秒" << " xx2:" << o_elapsed_time2.count() << " 秒" <<
-    std::endl;
-  */
-  return {order_loader.row_count(), lineitem_loader.row_count()};
+  return {lineitem_loader.row_count(), 0};
 }
 
 std::pair<int, int> TPCHTableGenerator::generate_nation() {
@@ -324,9 +306,8 @@ std::pair<int, int> TPCHTableGenerator::generate_nation() {
   return {loader.row_count(), 0};
 }
 
-std::pair<int, int> TPCHTableGenerator::generate_part_and_partsupp() {
+std::pair<int, int> TPCHTableGenerator::generate_part() {
   TableLoader part_loader("part");
-  TableLoader partsupp_loader("partsupp");
 
   part_t part{};
   for (auto part_idx = part_offset_; rowcnt_; rowcnt_--, ++part_idx) {
@@ -343,8 +324,19 @@ std::pair<int, int> TPCHTableGenerator::generate_part_and_partsupp() {
         .addItem(convert_money_str(part.retailprice).data())
         .addItem(part.comment)
         .end();
+  }
 
-    for (const auto& partsupp : part.s) {
+  return {part_loader.row_count(), 0};
+}
+
+std::pair<int, int> TPCHTableGenerator::generate_partsupp() {
+  TableLoader partsupp_loader("partsupp");
+
+  partsupp__t partsupps{};
+  for (auto part_idx = part_offset_; rowcnt_; rowcnt_--, ++part_idx) {
+    call_dbgen_mk<partsupp__t>(part_idx + 1, partsupps, mk_partsupp, PART_PSUPP, &ctx_);
+
+    for (auto partsupp : partsupps.s) {
       partsupp_loader.start()
           .addItem(partsupp.partkey)
           .addItem(partsupp.suppkey)
@@ -355,7 +347,7 @@ std::pair<int, int> TPCHTableGenerator::generate_part_and_partsupp() {
     }
   }
 
-  return {part_loader.row_count(), partsupp_loader.row_count()};
+  return {partsupp_loader.row_count(), 0};
 }
 
 std::pair<int, int> TPCHTableGenerator::generate_region() {

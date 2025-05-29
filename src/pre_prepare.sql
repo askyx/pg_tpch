@@ -27,11 +27,11 @@ INSERT INTO tpch.tpch_tables(table_name, status, weight) VALUES ('nation', 0, 1)
 INSERT INTO tpch.tpch_tables(table_name, status, weight) VALUES ('region', 0, 1);
 INSERT INTO tpch.tpch_tables(table_name, status, weight) VALUES ('supplier', 0, 1);
 
-INSERT INTO tpch.tpch_tables(table_name, status, weight) VALUES ('lineitem', 2, 0);
-INSERT INTO tpch.tpch_tables(table_name, status, weight) VALUES ('partsupp', 2, 0);
+INSERT INTO tpch.tpch_tables(table_name, status, weight) VALUES ('orders', 0, 4);
+INSERT INTO tpch.tpch_tables(table_name, status, weight) VALUES ('lineitem', 0, 6);
 
-INSERT INTO tpch.tpch_tables(table_name, status, child, weight) VALUES ('orders', 1, 'lineitem', 10);
-INSERT INTO tpch.tpch_tables(table_name, status, child, weight) VALUES ('part', 1, 'partsupp', 2);
+INSERT INTO tpch.tpch_tables(table_name, status, weight) VALUES ('part', 0, 1);
+INSERT INTO tpch.tpch_tables(table_name, status, weight) VALUES ('partsupp', 0, 2);
 
 
 CREATE TABLE tpch.tpch_host_info(host_core INT);

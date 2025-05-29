@@ -76,6 +76,8 @@ int pr_order PROTO((order_t * o, int mode));
 int ld_order PROTO((order_t * o, int mode));
 void mk_sparse PROTO((DSS_HUGE index, DSS_HUGE *ok, long seq));
 
+long mk_lineitem PROTO((DSS_HUGE index, order_t *o, DBGenContext *ctx, long upd_num));
+
 typedef struct {
 	DSS_HUGE partkey;
 	DSS_HUGE suppkey;
@@ -101,10 +103,16 @@ typedef struct {
 	partsupp_t s[SUPP_PER_PART];
 } part_t;
 
+typedef struct {
+	partsupp_t s[SUPP_PER_PART];
+} partsupp__t;
+
 /* parts.c */
 long mk_part PROTO((DSS_HUGE index, part_t *p, DBGenContext *ctx));
 int pr_part PROTO((part_t * part, int mode));
 int ld_part PROTO((part_t * part, int mode));
+
+long mk_partsupp PROTO((DSS_HUGE index, partsupp__t *p, DBGenContext *ctx));
 
 typedef struct {
 	DSS_HUGE suppkey;

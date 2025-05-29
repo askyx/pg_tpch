@@ -157,8 +157,60 @@ long mk_order(DSS_HUGE index, order_t *o, DBGenContext *ctx, long upd_num) {
 
 	RANDOM(o->lines, O_LCNT_MIN, O_LCNT_MAX, &ctx->Seed[O_LCNT_SD]);
 	for (lcnt = 0; lcnt < o->lines; lcnt++) {
-		o->l[lcnt].okey = o->okey;
-		;
+		RANDOM(o->l[lcnt].quantity, L_QTY_MIN, L_QTY_MAX, &ctx->Seed[L_QTY_SD]);
+		RANDOM(o->l[lcnt].discount, L_DCNT_MIN, L_DCNT_MAX, &ctx->Seed[L_DCNT_SD]);
+		RANDOM(o->l[lcnt].tax, L_TAX_MIN, L_TAX_MAX, &ctx->Seed[L_TAX_SD]);
+		if (ctx->scale_factor >= 30000)
+			RANDOM64(o->l[lcnt].partkey, L_PKEY_MIN, L_PKEY_MAX, &ctx->Seed[L_PKEY_SD]);
+		else
+			RANDOM(o->l[lcnt].partkey, L_PKEY_MIN, L_PKEY_MAX, &ctx->Seed[L_PKEY_SD]);
+		rprice = rpb_routine(o->l[lcnt].partkey);
+		o->l[lcnt].quantity *= 100;
+		o->l[lcnt].eprice = rprice * o->l[lcnt].quantity / 100;
+
+		o->totalprice += ((o->l[lcnt].eprice * ((long)100 - o->l[lcnt].discount)) / (long)PENNIES) *
+		                 ((long)100 + o->l[lcnt].tax) / (long)PENNIES;
+
+		RANDOM(s_date, L_SDTE_MIN, L_SDTE_MAX, &ctx->Seed[L_SDTE_SD]);
+
+		if (julian(s_date) <= CURRENTDATE) {
+			ocnt++;
+		}
+	}
+
+	if (ocnt > 0)
+		o->orderstatus = 'P';
+	if (ocnt == o->lines)
+		o->orderstatus = 'F';
+
+	return (0);
+}
+
+long mk_lineitem (DSS_HUGE index, order_t *o, DBGenContext *ctx, long upd_num) {
+	DSS_HUGE lcnt;
+	DSS_HUGE rprice;
+	DSS_HUGE tmp_date;
+	DSS_HUGE s_date;
+	DSS_HUGE r_date;
+	DSS_HUGE c_date;
+	DSS_HUGE supp_num;
+	static char **asc_date = NULL;
+	char tmp_str[2];
+	char **mk_ascdate PROTO((void));
+
+	if (asc_date == NULL)
+		asc_date = mk_ascdate();
+
+	DSS_HUGE okey;
+	mk_sparse(index, &okey, (upd_num == 0) ? 0 : 1 + upd_num / (10000 / UPD_PCT));
+	
+
+	RANDOM(tmp_date, O_ODATE_MIN, O_ODATE_MAX, &ctx->Seed[O_ODATE_SD]);
+
+
+	RANDOM(o->lines, O_LCNT_MIN, O_LCNT_MAX, &ctx->Seed[O_LCNT_SD]);
+	for (lcnt = 0; lcnt < o->lines; lcnt++) {
+		o->l[lcnt].okey = okey;
 		o->l[lcnt].lcnt = lcnt + 1;
 		RANDOM(o->l[lcnt].quantity, L_QTY_MIN, L_QTY_MAX, &ctx->Seed[L_QTY_SD]);
 		RANDOM(o->l[lcnt].discount, L_DCNT_MIN, L_DCNT_MAX, &ctx->Seed[L_DCNT_SD]);
@@ -176,9 +228,6 @@ long mk_order(DSS_HUGE index, order_t *o, DBGenContext *ctx, long upd_num) {
 		PART_SUPP_BRIDGE(o->l[lcnt].suppkey, o->l[lcnt].partkey, supp_num);
 		o->l[lcnt].quantity *= 100;
 		o->l[lcnt].eprice = rprice * o->l[lcnt].quantity / 100;
-
-		o->totalprice += ((o->l[lcnt].eprice * ((long)100 - o->l[lcnt].discount)) / (long)PENNIES) *
-		                 ((long)100 + o->l[lcnt].tax) / (long)PENNIES;
 
 		RANDOM(s_date, L_SDTE_MIN, L_SDTE_MAX, &ctx->Seed[L_SDTE_SD]);
 		s_date += tmp_date;
@@ -198,16 +247,10 @@ long mk_order(DSS_HUGE index, order_t *o, DBGenContext *ctx, long upd_num) {
 			o->l[lcnt].rflag[0] = 'N';
 
 		if (julian(s_date) <= CURRENTDATE) {
-			ocnt++;
 			o->l[lcnt].lstatus[0] = 'F';
 		} else
 			o->l[lcnt].lstatus[0] = 'O';
 	}
-
-	if (ocnt > 0)
-		o->orderstatus = 'P';
-	if (ocnt == o->lines)
-		o->orderstatus = 'F';
 
 	return (0);
 }
@@ -241,6 +284,20 @@ long mk_part(DSS_HUGE index, part_t *p, DBGenContext *ctx) {
 
 	for (snum = 0; snum < SUPP_PER_PART; snum++) {
 		p->s[snum].partkey = p->partkey;
+		PART_SUPP_BRIDGE(p->s[snum].suppkey, index, snum);
+		RANDOM(p->s[snum].qty, PS_QTY_MIN, PS_QTY_MAX, &ctx->Seed[PS_QTY_SD]);
+		RANDOM(p->s[snum].scost, PS_SCST_MIN, PS_SCST_MAX, &ctx->Seed[PS_SCST_SD]);
+		TEXT(PS_CMNT_LEN, &ctx->Seed[PS_CMNT_SD], p->s[snum].comment);
+		p->s[snum].clen = (int)strlen(p->s[snum].comment);
+	}
+	return (0);
+}
+
+long mk_partsupp (DSS_HUGE index, partsupp__t *p, DBGenContext *ctx) {
+	long snum;
+	
+	for (snum = 0; snum < SUPP_PER_PART; snum++) {
+		p->s[snum].partkey = index;
 		PART_SUPP_BRIDGE(p->s[snum].suppkey, index, snum);
 		RANDOM(p->s[snum].qty, PS_QTY_MIN, PS_QTY_MAX, &ctx->Seed[PS_QTY_SD]);
 		RANDOM(p->s[snum].scost, PS_SCST_MIN, PS_SCST_MAX, &ctx->Seed[PS_SCST_SD]);

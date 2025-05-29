@@ -24,9 +24,11 @@ class TPCHTableGenerator {
   ~TPCHTableGenerator();
 
   std::pair<int, int> generate_customer();
-  std::pair<int, int> generate_orders_and_lineitem();
+  std::pair<int, int> generate_orders();
+  std::pair<int, int> generate_lineitem();
   std::pair<int, int> generate_nation();
-  std::pair<int, int> generate_part_and_partsupp();
+  std::pair<int, int> generate_part();
+  std::pair<int, int> generate_partsupp();
   std::pair<int, int> generate_region();
   std::pair<int, int> generate_supplier();
 
