@@ -1,44 +1,19 @@
 #pragma once
 
-#include <filesystem>
-#include <limits>
-#include <memory>
-#include <string>
-#include <unordered_map>
-#include <utility>
-#include <vector>
-
 #include "dss.h"
-
-extern "C" {
-#include "postgres_ext.h"
-}
 
 namespace tpch {
 
 class TPCHTableGenerator {
  public:
-  TPCHTableGenerator(double scale_factor, const std::string& table, int table_id, int children, int step,
-                     std::filesystem::path resource_dir, int rng_seed = 19620718);
+  TPCHTableGenerator(double scale_factor);
 
   ~TPCHTableGenerator();
 
-  std::pair<int, int> generate_customer();
-  std::pair<int, int> generate_orders();
-  std::pair<int, int> generate_lineitem();
-  std::pair<int, int> generate_nation();
-  std::pair<int, int> generate_part();
-  std::pair<int, int> generate_partsupp();
-  std::pair<int, int> generate_region();
-  std::pair<int, int> generate_supplier();
+  int load_table(char* table, int children, int step);
 
  private:
-  std::string table_;
-  int table_id_;
   DBGenContext ctx_;
-
-  size_t part_offset_{0};
-  size_t rowcnt_{0};
 };
 
 }  // namespace tpch

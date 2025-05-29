@@ -1,12 +1,13 @@
-#include <climits>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
-#include <filesystem>
+
 #include <format>
+#include <map>
 #include <string>
 #include <utility>
+#include <vector>
 
 #define DECLARER
 
@@ -14,16 +15,28 @@
 #include "tpch_dsdgen.h"
 
 extern "C" {
+#include <c.h>
 #include <postgres.h>
+#include <fmgr.h>
 
+#include <access/htup.h>
 #include <access/table.h>
+#include <access/xloginsert.h>
 #include <executor/spi.h>
 #include <lib/stringinfo.h>
 #include <libpq/pqformat.h>
 #include <miscadmin.h>
+#include <nodes/print.h>
+#include <storage/block.h>
+#include <storage/bufmgr.h>
 #include <utils/builtins.h>
 #include <utils/lsyscache.h>
+#include <utils/relcache.h>
+
+#include "utils/palloc.h"
 }
+
+#include <generator>
 
 #include "dss.h"
 #include "dsstypes.h"
@@ -69,9 +82,421 @@ void skip(int table, int children, DSS_HUGE step, DBGenContext& dbgen_ctx) {
   }
 }
 
-TPCHTableGenerator::TPCHTableGenerator(double scale_factor, const std::string& table, int table_id, int children,
-                                       int step, std::filesystem::path resource_dir, int rng_seed)
-    : table_{std::move(table)}, table_id_{table_id} {
+std::string convert_money_str(DSS_HUGE cents) {
+  if (cents < 0) {
+    cents = std::abs(cents);
+    return std::format("-{}.{:02d}", cents / 100, cents % 100);
+  } else
+    return std::format("{}.{:02d}", cents / 100, cents % 100);
+}
+
+std::string convert_str(auto date) {
+  return std::format("{}", date);
+}
+
+struct LoaderInfo {
+  TupleDesc desc;
+  DBGenContext* generate_ctx;
+  size_t rowcnt;
+  size_t offset;
+
+  int current_item = 0;
+  std::vector<FmgrInfo> in_functions;
+  std::vector<Oid> typioparams;
+
+  LoaderInfo(TupleDesc desc, DBGenContext* generate_ctx, size_t rowcnt, size_t offset)
+      : desc(desc), generate_ctx(generate_ctx), rowcnt(rowcnt), offset(offset) {
+    Oid in_func_oid;
+
+    in_functions.resize(desc->natts);
+    typioparams.resize(desc->natts);
+    for (auto attnum = 1; attnum <= desc->natts; attnum++) {
+      Form_pg_attribute att = TupleDescAttr(desc, attnum - 1);
+
+      getTypeInputInfo(att->atttypid, &in_func_oid, &typioparams[attnum - 1]);
+      fmgr_info(in_func_oid, &in_functions[attnum - 1]);
+    }
+  }
+
+  void reset() { current_item = 0; }
+
+  template <typename T>
+  Datum addItem(T value) {
+    Datum v;
+    if constexpr (std::is_same_v<T, char*> || std::is_same_v<T, const char*> || std::is_same_v<T, char>)
+      v = DirectFunctionCall3(in_functions[current_item].fn_addr, CStringGetDatum(value),
+                              ObjectIdGetDatum(typioparams[current_item]),
+                              TupleDescAttr(desc, current_item)->atttypmod);
+    else  // else check
+      v = value;
+
+    current_item++;
+    return v;
+  }
+
+  std::generator<HeapTuple> generate(int table_id) {
+    if (table_id == NATION)
+      return generate_nation();
+    else if (table_id == CUST)
+      return generate_customer();
+    else if (table_id == ORDER)
+      return generate_orders();
+    else if (table_id == LINE)
+      return generate_lineitem();
+    else if (table_id == PART)
+      return generate_part();
+    else if (table_id == PSUPP)
+      return generate_partsupp();
+    else if (table_id == REGION)
+      return generate_region();
+    else if (table_id == SUPP)
+      return generate_supplier();
+
+    std::unreachable();
+  }
+
+  std::generator<HeapTuple> generate_supplier() {
+    supplier_t supplier{};
+    Datum values[7] = {0};
+    bool nulls[7] = {false};
+
+    for (auto supplier_idx = offset; rowcnt; rowcnt--, ++supplier_idx) {
+      call_dbgen_mk<supplier_t>(supplier_idx + 1, supplier, mk_supp, SUPP, generate_ctx);
+
+      values[0] = addItem(supplier.suppkey);
+      values[1] = addItem(supplier.name);
+      values[2] = addItem(supplier.address);
+      values[3] = addItem(supplier.nation_code);
+      values[4] = addItem(supplier.phone);
+      values[5] = addItem(convert_money_str(supplier.acctbal).data());
+      values[6] = addItem(supplier.comment);
+
+      reset();
+      co_yield heap_form_tuple(desc, values, nulls);
+    }
+  }
+
+  std::generator<HeapTuple> generate_region() {
+    code_t region{};
+    Datum values[3] = {0};
+    bool nulls[3] = {false};
+
+    for (auto region_idx = offset; rowcnt; rowcnt--, ++region_idx) {
+      call_dbgen_mk<code_t>(region_idx + 1, region, mk_region, REGION, generate_ctx);
+      values[0] = addItem(region.code);
+      values[1] = addItem(region.text);
+      values[2] = addItem(region.comment);
+
+      reset();
+      co_yield heap_form_tuple(desc, values, nulls);
+    }
+  }
+
+  std::generator<HeapTuple> generate_partsupp() {
+    partsupp__t partsupps{};
+    Datum values[5] = {0};
+    bool nulls[5] = {false};
+
+    for (auto part_idx = offset; rowcnt; rowcnt--, ++part_idx) {
+      call_dbgen_mk<partsupp__t>(part_idx + 1, partsupps, mk_partsupp, PART_PSUPP, generate_ctx);
+
+      for (auto partsupp : partsupps.s) {
+        values[0] = addItem(partsupp.partkey);
+        values[1] = addItem(partsupp.suppkey);
+        values[2] = addItem(partsupp.qty);
+        values[3] = addItem(convert_money_str(partsupp.scost).data());
+        values[4] = addItem(partsupp.comment);
+
+        reset();
+        co_yield heap_form_tuple(desc, values, nulls);
+      }
+    }
+  }
+
+  std::generator<HeapTuple> generate_part() {
+    part_t part{};
+    Datum values[9] = {0};
+    bool nulls[9] = {false};
+
+    for (auto part_idx = offset; rowcnt; rowcnt--, ++part_idx) {
+      call_dbgen_mk<part_t>(part_idx + 1, part, mk_part, PART_PSUPP, generate_ctx);
+
+      values[0] = addItem(part.partkey);
+      values[1] = addItem(part.name);
+      values[2] = addItem(part.mfgr);
+      values[3] = addItem(part.brand);
+      values[4] = addItem(part.type);
+      values[5] = addItem(part.size);
+      values[6] = addItem(part.container);
+      values[7] = addItem(convert_money_str(part.retailprice).data());
+      values[8] = addItem(part.comment);
+
+      reset();
+      co_yield heap_form_tuple(desc, values, nulls);
+    }
+  }
+
+  std::generator<HeapTuple> generate_lineitem() {
+    order_t order{};
+    Datum values[16] = {0};
+    bool nulls[16] = {false};
+
+    for (auto order_idx = offset; rowcnt; rowcnt--, ++order_idx) {
+      call_dbgen_mk<order_t>(order_idx + 1, order, mk_lineitem, ORDER_LINE, generate_ctx, 0l);
+
+      for (auto line_idx = int64_t{0}; line_idx < order.lines; ++line_idx) {
+        const auto& lineitem = order.l[line_idx];
+
+        values[0] = addItem(lineitem.okey);
+        values[1] = addItem(lineitem.partkey);
+        values[2] = addItem(lineitem.suppkey);
+        values[3] = addItem(lineitem.lcnt);
+        values[4] = addItem(convert_money_str(lineitem.quantity).data());
+        values[5] = addItem(convert_money_str(lineitem.eprice).data());
+        values[6] = addItem(convert_money_str(lineitem.discount).data());
+        values[7] = addItem(convert_money_str(lineitem.tax).data());
+        values[8] = addItem(convert_str(lineitem.rflag[0]).data());
+        values[9] = addItem(convert_str(lineitem.lstatus[0]).data());
+        values[10] = addItem(lineitem.sdate);
+        values[11] = addItem(lineitem.cdate);
+        values[12] = addItem(lineitem.rdate);
+        values[13] = addItem(lineitem.shipinstruct);
+        values[14] = addItem(lineitem.shipmode);
+        values[15] = addItem(lineitem.comment);
+        reset();
+
+        co_yield heap_form_tuple(desc, values, nulls);
+      }
+    }
+  }
+
+  std::generator<HeapTuple> generate_orders() {
+    order_t order{};
+    Datum values[9] = {0};
+    bool nulls[9] = {false};
+
+    for (auto order_idx = offset; rowcnt > 0; rowcnt--, ++order_idx) {
+      call_dbgen_mk<order_t>(order_idx + 1, order, mk_order, ORDER_LINE, generate_ctx, 0l);
+
+      values[0] = addItem(order.okey);
+      values[1] = addItem(order.custkey);
+      values[2] = addItem(convert_str(order.orderstatus).data());
+      values[3] = addItem(convert_money_str(order.totalprice).data());
+      values[4] = addItem(order.odate);
+      values[5] = addItem(order.opriority);
+      values[6] = addItem(order.clerk);
+      values[7] = addItem(order.spriority);
+      values[8] = addItem(order.comment);
+      reset();
+
+      co_yield heap_form_tuple(desc, values, nulls);
+    }
+  }
+
+  std::generator<HeapTuple> generate_customer() {
+    customer_t customer{};
+    Datum values[8] = {0};
+    bool nulls[8] = {false};
+
+    for (auto row_idx = offset; rowcnt > 0; rowcnt--, row_idx++) {
+      call_dbgen_mk<customer_t>(row_idx + 1, customer, mk_cust, CUST, generate_ctx);
+
+      values[0] = addItem(customer.custkey);
+      values[1] = addItem(customer.name);
+      values[2] = addItem(customer.address);
+      values[3] = addItem(customer.nation_code);
+      values[4] = addItem(customer.phone);
+      values[5] = addItem(convert_money_str(customer.acctbal).data());
+      values[6] = addItem(customer.mktsegment);
+      values[7] = addItem(customer.comment);
+      reset();
+
+      co_yield heap_form_tuple(desc, values, nulls);
+    }
+  }
+
+  std::generator<HeapTuple> generate_nation() {
+    code_t nation{};
+    Datum values[4] = {0};
+    bool nulls[4] = {false};
+
+    for (auto nation_idx = offset; rowcnt > 0; rowcnt--, ++nation_idx) {
+      call_dbgen_mk<code_t>(nation_idx + 1, nation, mk_nation, NATION, generate_ctx);
+      values[0] = addItem(nation.code);
+      values[1] = addItem(nation.text);
+      values[2] = addItem(nation.join);
+      values[3] = addItem(nation.comment);
+      reset();
+
+      co_yield heap_form_tuple(desc, values, nulls);
+    }
+  }
+};
+
+struct TpchXX {
+  static constexpr auto BUFFER_POOL_SIZE = 1024;
+
+  char* buffer_pool;
+  BlockNumber current_page{0};  // current processing page in buffer pool
+  BlockNumber total_pages{0};   // all processed pages, include flushed page
+  BlockNumber existing_pages;   // alreay existing pages in table
+
+  Relation relation;
+
+  TransactionId xid;
+  CommandId cid;
+
+  File opend_file{-1};
+
+  TpchXX(char* table) {
+    auto reloid = DirectFunctionCall1(regclassin, CStringGetDatum(table));
+    relation = try_table_open(reloid, NoLock);
+    if (!relation)
+      throw std::runtime_error("try_table_open Failed");
+
+    xid = GetCurrentTransactionId();
+    cid = GetCurrentCommandId(true);
+    existing_pages = RelationGetNumberOfBlocks(relation);
+    buffer_pool = (char*)palloc(BLCKSZ * BUFFER_POOL_SIZE);
+
+    init_current_page();
+  }
+
+  ~TpchXX() {
+    flush_page();
+    if (pg_fsync(opend_file) != 0)
+      ereport(WARNING, (errcode_for_file_access(), errmsg("could not sync data file: %m")));
+    if (close(opend_file) < 0)
+      ereport(WARNING, (errcode_for_file_access(), errmsg("could not close data file: %m")));
+    opend_file = -1;
+    pfree(buffer_pool);
+    table_close(relation, NoLock);
+  }
+
+  int load(DBGenContext* ctx, int table, size_t row_count, size_t offset) {
+    LoaderInfo loader{RelationGetDescr(relation), ctx, row_count, offset};
+    int count = 0;
+    for (auto&& tuple : loader.generate(table)) {
+      input(tuple);
+      count++;
+    }
+    return count;
+  }
+
+  Page get_current_page() { return buffer_pool + BLCKSZ * current_page; }
+
+  BlockNumber get_current_page_number() { return total_pages + existing_pages; }
+
+  void close_or_open_file() {
+    auto current_page = get_current_page_number();
+    if (current_page % RELSEG_SIZE == 0 && opend_file != -1) {
+      if (pg_fsync(opend_file) != 0)
+        ereport(WARNING, (errcode_for_file_access(), errmsg("could not sync data file: %m")));
+      if (close(opend_file) < 0)
+        ereport(WARNING, (errcode_for_file_access(), errmsg("could not close data file: %m")));
+      opend_file = -1;
+    }
+
+    if (opend_file == -1) {
+      RelFileLocatorBackend file_loc{relation->rd_locator, (ProcNumber)InvalidCommandId};
+      auto fname = relpath(file_loc, MAIN_FORKNUM);
+      if (auto segno = current_page / RELSEG_SIZE; segno > 0) {
+        char* tmp = (char*)palloc(strlen(fname) + 12);
+
+        sprintf(tmp, "%s.%u", fname, segno);
+        pfree(fname);
+        fname = tmp;
+      }
+
+      if (opend_file = BasicOpenFilePerm(fname, O_CREAT | O_WRONLY | PG_BINARY, S_IRUSR | S_IWUSR); opend_file < 0) {
+        ereport(ERROR, (errcode_for_file_access(), errmsg("could not open file \"%s\": %m", fname)));
+      }
+      if (auto x = lseek(opend_file, BLCKSZ * (current_page % RELSEG_SIZE), SEEK_SET); x < 0) {
+        close(opend_file);
+        opend_file = -1;
+        ereport(ERROR, (errcode_for_file_access(), errmsg("could not seek to position %u in file \"%s\": %m",
+                                                          BLCKSZ * (current_page % RELSEG_SIZE), fname)));
+      }
+      pfree(fname);
+    }
+  }
+
+  void flush_page() {
+    auto flush_page = current_page;
+    if (!PageIsEmpty(get_current_page()))
+      flush_page += 1;
+
+    if (flush_page > 0) {
+      if (unlikely(total_pages == 0)) {
+        auto recptr = log_newpage(&relation->rd_locator, MAIN_FORKNUM, existing_pages, buffer_pool, true);
+        XLogFlush(recptr);
+      }
+
+      for (auto i = 0; i < flush_page;) {
+        auto current_page = get_current_page_number();
+
+        close_or_open_file();
+
+        auto sflush_page = std::min(RELSEG_SIZE - (current_page % RELSEG_SIZE), flush_page - i);
+
+        auto buffer_pos = buffer_pool + BLCKSZ * i;
+        auto buffer_w = BLCKSZ * sflush_page;
+        while (buffer_w > 0) {
+          if (auto written = write(opend_file, buffer_pos, buffer_w); written == -1)
+            throw std::runtime_error("write failed");
+          else {
+            buffer_pos += written;
+            buffer_w -= written;
+          }
+        }
+        i += sflush_page;
+      }
+
+      total_pages += flush_page;
+    }
+  }
+
+  void init_current_page() {
+    auto page = get_current_page();
+
+    PageInit(page, BLCKSZ, 0);
+  }
+
+  void fix_tuple(HeapTuple tuple) {
+    tuple->t_data->t_infomask &= ~(HEAP_XACT_MASK);
+    tuple->t_data->t_infomask2 &= ~(HEAP2_XACT_MASK);
+    tuple->t_data->t_infomask |= HEAP_XMAX_INVALID;
+    HeapTupleHeaderSetXmin(tuple->t_data, xid);
+    HeapTupleHeaderSetCmin(tuple->t_data, cid);
+    HeapTupleHeaderSetXmax(tuple->t_data, 0);
+  }
+
+  void input(HeapTuple tuple) {
+    auto page = get_current_page();
+    if (PageGetFreeSpace(page) <
+        MAXALIGN(tuple->t_len) + RelationGetTargetPageFreeSpace(relation, HEAP_DEFAULT_FILLFACTOR)) {
+      if (current_page < BUFFER_POOL_SIZE - 1) {
+        current_page++;
+      } else {
+        flush_page();
+        current_page = 0;
+      }
+      init_current_page();
+      page = get_current_page();
+    }
+
+    fix_tuple(tuple);
+
+    auto offnum = PageAddItem(page, (Item)tuple->t_data, tuple->t_len, InvalidOffsetNumber, false, true);
+
+    ItemPointerSet(&(tuple->t_self), get_current_page_number() + current_page, offnum);
+    auto item_id = PageGetItemId(page, offnum);
+    auto item = PageGetItem(page, item_id);
+    ((HeapTupleHeader)item)->t_ctid = tuple->t_self;
+  }
+};
+
+TPCHTableGenerator::TPCHTableGenerator(double scale_factor) {
   tdef* tdefs = ctx_.tdefs;
   tdefs[PART].base = 200000;
   tdefs[PSUPP].base = 200000;
@@ -102,285 +527,41 @@ TPCHTableGenerator::TPCHTableGenerator(double scale_factor, const std::string& t
   load_dists(10 * 1024 * 1024, &ctx_);  // 10MiB
   tdefs[NATION].base = nations.count;
   tdefs[REGION].base = regions.count;
-
-  {
-    if (table_id_ < NATION)
-      rowcnt_ = tdefs[table_id_].base * ctx_.scale_factor;
-    else
-      rowcnt_ = tdefs[table_id_].base;
-
-    if (children > 1 && step != -1) {
-      size_t part_size = std::ceil((double)rowcnt_ / (double)children);
-      part_offset_ = part_size * step;
-      auto part_end = part_offset_ + part_size;
-      rowcnt_ = part_end > rowcnt_ ? rowcnt_ - part_offset_ : part_size;
-      skip(table_id_, children, part_offset_, ctx_);
-    }
-  }
 }
 
 TPCHTableGenerator::~TPCHTableGenerator() {
   cleanup_dists();
 }
 
-class TableLoader {
- public:
-  TableLoader(const std::string& table) : table_{std::move(table)} {
-    reloid_ = DirectFunctionCall1(regclassin, CStringGetDatum(table_.c_str()));
-    rel_ = try_table_open(reloid_, NoLock);
-    if (!rel_)
-      throw std::runtime_error("try_table_open Failed");
-
-    auto tupDesc = RelationGetDescr(rel_);
-    Oid in_func_oid;
-
-    in_functions = new FmgrInfo[tupDesc->natts];
-    typioparams = new Oid[tupDesc->natts];
-
-    for (auto attnum = 1; attnum <= tupDesc->natts; attnum++) {
-      Form_pg_attribute att = TupleDescAttr(tupDesc, attnum - 1);
-
-      getTypeInputInfo(att->atttypid, &in_func_oid, &typioparams[attnum - 1]);
-      fmgr_info(in_func_oid, &in_functions[attnum - 1]);
-    }
-
-    slot = MakeSingleTupleTableSlot(tupDesc, &TTSOpsMinimalTuple);
-    slot->tts_tableOid = RelationGetRelid(rel_);
+int TPCHTableGenerator::load_table(char* table, int children, int step) {
+  std::map<std::string, int> table_mape = {
+      {"nation", NATION}, {"region", REGION}, {"part", PART},    {"partsupp", PSUPP},
+      {"supplier", SUPP}, {"customer", CUST}, {"orders", ORDER}, {"lineitem", LINE},
   };
 
-  ~TableLoader() {
-    table_close(rel_, NoLock);
-    free(in_functions);
-    free(typioparams);
-    ExecDropSingleTupleTableSlot(slot);
+  if (table_mape.find(table) == table_mape.end())
+    throw std::runtime_error("Invalid table name");
+
+  auto table_id = table_mape[table];
+
+  size_t rowcnt = 0;
+  int offset = 0;
+
+  if (table_id < NATION)
+    rowcnt = ctx_.tdefs[table_id].base * ctx_.scale_factor;
+  else
+    rowcnt = ctx_.tdefs[table_id].base;
+
+  if (children > 1 && step != -1) {
+    size_t part_size = std::ceil((double)rowcnt / (double)children);
+    offset = part_size * step;
+    auto part_end = offset + part_size;
+    rowcnt = part_end > rowcnt ? rowcnt - offset : part_size;
+    skip(table_id, children, offset, ctx_);
   }
 
-  template <typename T>
-  auto& addItem(T value) {
-    Datum datum;
-    if constexpr (std::is_same_v<T, char*> || std::is_same_v<T, const char*> || std::is_same_v<T, char>)
-      slot->tts_values[current_item_] = DirectFunctionCall3(
-          in_functions[current_item_].fn_addr, CStringGetDatum(value), ObjectIdGetDatum(typioparams[current_item_]),
-          TupleDescAttr(RelationGetDescr(rel_), current_item_)->atttypmod);
-    else  // else check
-      slot->tts_values[current_item_] = value;
-
-    current_item_++;
-    return *this;
-  }
-
-  auto& start() {
-    ExecClearTuple(slot);
-    MemSet(slot->tts_values, 0, RelationGetDescr(rel_)->natts * sizeof(Datum));
-    /* all tpch table is not null */
-    MemSet(slot->tts_isnull, false, RelationGetDescr(rel_)->natts * sizeof(bool));
-    current_item_ = 0;
-    return *this;
-  }
-
-  auto& end() {
-    ExecStoreVirtualTuple(slot);
-
-    table_tuple_insert(rel_, slot, mycid, ti_options, NULL);
-    // reindex ？
-    // if (rel_->ri_NumIndices > 0)
-    //   recheckIndexes = ExecInsertIndexTuples(rel_, myslot, estate, false, false, NULL, NIL, false);
-
-    row_count_++;
-    return *this;
-  }
-
-  auto row_count() const { return row_count_; }
-
-  Oid reloid_;
-  Relation rel_;
-  std::string table_;
-  size_t row_count_ = 0;
-  size_t current_item_ = 0;
-
-  FmgrInfo* in_functions;
-  Oid* typioparams;
-  TupleTableSlot* slot;
-  CommandId mycid = GetCurrentCommandId(true);
-  int ti_options = (TABLE_INSERT_SKIP_FSM | TABLE_INSERT_FROZEN | TABLE_INSERT_NO_LOGICAL);
-};
-
-std::string convert_money_str(DSS_HUGE cents) {
-  if (cents < 0) {
-    cents = std::abs(cents);
-    return std::format("-{}.{:02d}", cents / 100, cents % 100);
-  } else
-    return std::format("{}.{:02d}", cents / 100, cents % 100);
-}
-
-std::string convert_str(auto date) {
-  return std::format("{}", date);
-}
-
-std::pair<int, int> TPCHTableGenerator::generate_customer() {
-  TableLoader loader(table_);
-
-  customer_t customer{};
-  for (auto row_idx = part_offset_; rowcnt_; rowcnt_--, row_idx++) {
-    call_dbgen_mk<customer_t>(row_idx + 1, customer, mk_cust, CUST, &ctx_);
-
-    loader.start()
-        .addItem(customer.custkey)
-        .addItem(customer.name)
-        .addItem(customer.address)
-        .addItem(customer.nation_code)
-        .addItem(customer.phone)
-        .addItem(convert_money_str(customer.acctbal).data())
-        .addItem(customer.mktsegment)
-        .addItem(customer.comment)
-        .end();
-  }
-
-  return {loader.row_count(), 0};
-}
-
-std::pair<int, int> TPCHTableGenerator::generate_orders() {
-  TableLoader order_loader("orders");
-
-  order_t order{};
-  for (auto order_idx = part_offset_; rowcnt_; rowcnt_--, ++order_idx) {
-    call_dbgen_mk<order_t>(order_idx + 1, order, mk_order, ORDER_LINE, &ctx_, 0l);
-
-    order_loader.start()
-        .addItem(order.okey)
-        .addItem(order.custkey)
-        .addItem(convert_str(order.orderstatus).data())
-        .addItem(convert_money_str(order.totalprice).data())
-        .addItem(order.odate)
-        .addItem(order.opriority)
-        .addItem(order.clerk)
-        .addItem(order.spriority)
-        .addItem(order.comment)
-        .end();
-  }
-  return {order_loader.row_count(), 0};
-}
-
-std::pair<int, int> TPCHTableGenerator::generate_lineitem() {
-  TableLoader lineitem_loader("lineitem");
-
-  order_t order{};
-  for (auto order_idx = part_offset_; rowcnt_; rowcnt_--, ++order_idx) {
-    call_dbgen_mk<order_t>(order_idx + 1, order, mk_lineitem, ORDER_LINE, &ctx_, 0l);
-
-    for (auto line_idx = int64_t{0}; line_idx < order.lines; ++line_idx) {
-      const auto& lineitem = order.l[line_idx];
-
-      lineitem_loader.start()
-          .addItem(lineitem.okey)
-          .addItem(lineitem.partkey)
-          .addItem(lineitem.suppkey)
-          .addItem(lineitem.lcnt)
-          .addItem(convert_money_str(lineitem.quantity).data())
-          .addItem(convert_money_str(lineitem.eprice).data())
-          .addItem(convert_money_str(lineitem.discount).data())
-          .addItem(convert_money_str(lineitem.tax).data())
-          .addItem(convert_str(lineitem.rflag[0]).data())
-          .addItem(convert_str(lineitem.lstatus[0]).data())
-          .addItem(lineitem.sdate)
-          .addItem(lineitem.cdate)
-          .addItem(lineitem.rdate)
-          .addItem(lineitem.shipinstruct)
-          .addItem(lineitem.shipmode)
-          .addItem(lineitem.comment)
-          .end();
-    }
-  }
-  return {lineitem_loader.row_count(), 0};
-}
-
-std::pair<int, int> TPCHTableGenerator::generate_nation() {
-  TableLoader loader(table_);
-
-  code_t nation{};
-  for (auto nation_idx = part_offset_; rowcnt_; rowcnt_--, ++nation_idx) {
-    call_dbgen_mk<code_t>(nation_idx + 1, nation, mk_nation, NATION, &ctx_);
-    loader.start().addItem(nation.code).addItem(nation.text).addItem(nation.join).addItem(nation.comment).end();
-  }
-
-  return {loader.row_count(), 0};
-}
-
-std::pair<int, int> TPCHTableGenerator::generate_part() {
-  TableLoader part_loader("part");
-
-  part_t part{};
-  for (auto part_idx = part_offset_; rowcnt_; rowcnt_--, ++part_idx) {
-    call_dbgen_mk<part_t>(part_idx + 1, part, mk_part, PART_PSUPP, &ctx_);
-
-    part_loader.start()
-        .addItem(part.partkey)
-        .addItem(part.name)
-        .addItem(part.mfgr)
-        .addItem(part.brand)
-        .addItem(part.type)
-        .addItem(part.size)
-        .addItem(part.container)
-        .addItem(convert_money_str(part.retailprice).data())
-        .addItem(part.comment)
-        .end();
-  }
-
-  return {part_loader.row_count(), 0};
-}
-
-std::pair<int, int> TPCHTableGenerator::generate_partsupp() {
-  TableLoader partsupp_loader("partsupp");
-
-  partsupp__t partsupps{};
-  for (auto part_idx = part_offset_; rowcnt_; rowcnt_--, ++part_idx) {
-    call_dbgen_mk<partsupp__t>(part_idx + 1, partsupps, mk_partsupp, PART_PSUPP, &ctx_);
-
-    for (auto partsupp : partsupps.s) {
-      partsupp_loader.start()
-          .addItem(partsupp.partkey)
-          .addItem(partsupp.suppkey)
-          .addItem(partsupp.qty)
-          .addItem(convert_money_str(partsupp.scost).data())
-          .addItem(partsupp.comment)
-          .end();
-    }
-  }
-
-  return {partsupp_loader.row_count(), 0};
-}
-
-std::pair<int, int> TPCHTableGenerator::generate_region() {
-  TableLoader loader(table_);
-
-  code_t region{};
-  for (auto region_idx = part_offset_; rowcnt_; rowcnt_--, ++region_idx) {
-    call_dbgen_mk<code_t>(region_idx + 1, region, mk_region, REGION, &ctx_);
-    loader.start().addItem(region.code).addItem(region.text).addItem(region.comment).end();
-  }
-
-  return {loader.row_count(), 0};
-}
-
-std::pair<int, int> TPCHTableGenerator::generate_supplier() {
-  TableLoader loader(table_);
-
-  supplier_t supplier{};
-  for (auto supplier_idx = part_offset_; rowcnt_; rowcnt_--, ++supplier_idx) {
-    call_dbgen_mk<supplier_t>(supplier_idx + 1, supplier, mk_supp, SUPP, &ctx_);
-
-    loader.start()
-        .addItem(supplier.suppkey)
-        .addItem(supplier.name)
-        .addItem(supplier.address)
-        .addItem(supplier.nation_code)
-        .addItem(supplier.phone)
-        .addItem(convert_money_str(supplier.acctbal).data())
-        .addItem(supplier.comment)
-        .end();
-  }
-
-  return {loader.row_count(), 0};
+  TpchXX tpch_nation(table);
+  return tpch_nation.load(&ctx_, table_id, rowcnt, offset);
 }
 
 }  // namespace tpch

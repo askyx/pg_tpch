@@ -9,8 +9,9 @@ extern "C" {
 #include <miscadmin.h>
 #include <utils/builtins.h>
 }
-#include <algorithm>
 #include <cassert>
+
+#include <algorithm>
 #include <filesystem>
 #include <format>
 #include <fstream>
@@ -126,30 +127,13 @@ tpch_runner_result *TPCHWrapper::RunTPCH(int qid) {
     throw std::runtime_error(std::format("Queries file for qid: {} does not exist", qid));
 }
 
-std::pair<int, int> TPCHWrapper::DBGen(double scale, char *table, int children, int step) {
+int TPCHWrapper::DBGen(double scale, char *table, int children, int step) {
   if (step >= children)
-    return {0, 0};
+    return 0;
 
-  const std::filesystem::path extension_dir = get_extension_external_directory();
+  TPCHTableGenerator generator(scale);
+  return generator.load_table(table, children, step);
 
-#define CALL_GENTBL(tbl, tbl_id, fuc)                                                  \
-  if (strcasecmp(table, #tbl) == 0) {                                                  \
-    TPCHTableGenerator generator(scale, table, tbl_id, children, step, extension_dir); \
-    return generator.fuc();                                                            \
-  }
-
-  CALL_GENTBL(customer, CUST, generate_customer)
-  CALL_GENTBL(nation, NATION, generate_nation)
-  CALL_GENTBL(region, REGION, generate_region)
-  CALL_GENTBL(supplier, SUPP, generate_supplier)
-  CALL_GENTBL(lineitem, LINE, generate_lineitem)
-  CALL_GENTBL(orders, ORDER, generate_orders)
-  CALL_GENTBL(part, PART, generate_part)
-  CALL_GENTBL(partsupp, PSUPP, generate_partsupp)
-
-#undef CALL_GENTBL
-
-  throw std::runtime_error(std::format("Table {} does not exist", table));
 }  // namespace tpch
 
 }  // namespace tpch

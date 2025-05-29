@@ -3,9 +3,8 @@ CREATE FUNCTION dbgen_internal(
   IN gentable TEXT,
   IN children INT DEFAULT 1,
   IN current_step INT DEFAULT -1,
-  OUT t1_count INT,
-  OUT t2_count INT
-) RETURNS record AS 'MODULE_PATHNAME',
+  OUT count INT
+) RETURNS INT AS 'MODULE_PATHNAME',
 'dbgen_internal' LANGUAGE C IMMUTABLE STRICT;
 
 CREATE FUNCTION tpch_prepare() RETURNS BOOLEAN AS 'MODULE_PATHNAME',
@@ -14,7 +13,7 @@ CREATE FUNCTION tpch_prepare() RETURNS BOOLEAN AS 'MODULE_PATHNAME',
 CREATE FUNCTION tpch_async_submit(IN SQL TEXT, OUT cid INT) RETURNS INT AS 'MODULE_PATHNAME',
 'tpch_async_submit' LANGUAGE C IMMUTABLE STRICT;
 
-CREATE FUNCTION tpch_async_consum(IN conn INT, OUT t1_count INT, OUT t2_count INT) RETURNS record AS 'MODULE_PATHNAME',
+CREATE FUNCTION tpch_async_consum(IN conn INT, OUT count INT) RETURNS INT AS 'MODULE_PATHNAME',
 'tpch_async_consum' LANGUAGE C IMMUTABLE STRICT;
 
 CREATE FUNCTION tpch_cleanup(clean_stats BOOLEAN DEFAULT FALSE) RETURNS BOOLEAN AS $$
@@ -59,26 +58,11 @@ BEGIN
     SELECT SUM(weight) INTO total_table_weight FROM tpch.tpch_tables;
 
     FOR rec IN SELECT table_name, status, child, weight FROM tpch.tpch_tables LOOP
-        -- children table
-        IF rec.status = 2 THEN
-            CONTINUE;
-        END IF;
-        num_children := CEIL(rec.weight::NUMERIC / total_table_weight * host_core_count);
-        FOR i IN 0..num_children - 1 LOOP
-            query_text := format('SELECT * FROM dbgen_internal(%s, %L, %s, %s)', scale_factor, rec.table_name, num_children, i);
-            -- raise notice '%', query_text;
-            INSERT INTO temp_cid_table SELECT cid, rec.table_name, rec.status, rec.child FROM tpch_async_submit(query_text);
-        END LOOP;
+        query_text := format('SELECT * FROM dbgen_internal(%s, %L, %s, %s)', scale_factor, rec.table_name, 1, 0);
+        EXECUTE query_text into  row_count_rec;
+        INSERT INTO temp_count_table VALUES(rec.table_name, row_count_rec.count);
     END LOOP;
 
-    FOR rec IN SELECT cid, c_name, c_status, c_child FROM temp_cid_table LOOP
-        SELECT t1_count, t2_count INTO row_count_rec FROM tpch_async_consum(rec.cid);
-        INSERT INTO temp_count_table VALUES(rec.c_name, row_count_rec.t1_count);
-
-        IF rec.c_status = 1 THEN
-            INSERT INTO temp_count_table VALUES(rec.c_child, row_count_rec.t2_count);
-        END IF;
-    END LOOP;
     FOR rec IN SELECT c_name, sum(c_count) as count FROM temp_count_table GROUP BY c_name order by 2 LOOP
         tab := rec.c_name;
         row_count := rec.count;

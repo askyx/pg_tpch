@@ -2,7 +2,6 @@
 #pragma once
 
 #include <cstdint>
-#include <string>
 
 namespace tpch {
 
@@ -14,7 +13,7 @@ struct tpch_runner_result {
 };
 
 struct TPCHWrapper {
-  static std::pair<int, int> DBGen(double scale, char* table, int children, int step);
+  static int DBGen(double scale, char* table, int children, int step);
 
   static uint32_t QueriesCount();
   static const char* GetQuery(int query);

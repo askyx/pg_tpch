@@ -1,5 +1,6 @@
 
 extern "C" {
+#include <c.h>
 #include <postgres.h>
 #include <fmgr.h>
 
@@ -20,6 +21,8 @@ extern "C" {
 #include <libpq-fe.h>
 #include <string.h>
 }
+
+#include <exception>
 
 #include "tpch/include/tpch_wrapper.hpp"
 
@@ -46,11 +49,9 @@ static int tpch_num_queries() {
   return tpch::TPCHWrapper::QueriesCount();
 }
 
-static void dbgen_internal(double scale_factor, char* table, int children, int step, int* count1, int* count2) {
+static int dbgen_internal(double scale_factor, char* table, int children, int step) {
   try {
-    auto count = tpch::TPCHWrapper::DBGen(scale_factor, table, children, step);
-    *count1 = count.first;
-    *count2 = count.second;
+    return tpch::TPCHWrapper::DBGen(scale_factor, table, children, step);
   } catch (const std::exception& e) {
     elog(ERROR, "TPC-H Failed to dsdgen, get error: %s", e.what());
   }
@@ -145,22 +146,10 @@ Datum dbgen_internal(PG_FUNCTION_ARGS) {
   char* table = text_to_cstring(PG_GETARG_TEXT_PP(1));
   int children = PG_GETARG_INT32(2);
   int step = PG_GETARG_INT32(3);
-  int count1 = 0;
-  int count2 = 0;
 
-  TupleDesc tupdesc;
-  Datum values[2];
-  bool nulls[2] = {false, false};
+  auto count = Int32GetDatum(tpch::dbgen_internal(sf, table, children, step));
 
-  if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
-    elog(ERROR, "return type must be a row type");
-
-  tpch::dbgen_internal(sf, table, children, step, &count1, &count2);
-
-  values[0] = count1;
-  values[1] = count2;
-
-  PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
+  PG_RETURN_INT32(count);
 }
 
 static PGconn* doConnect(void) {
@@ -284,20 +273,13 @@ Datum tpch_async_consum(PG_FUNCTION_ARGS) {
       pfree(message_hint);
       pfree(message_context);
     } else {
-      TupleDesc tupdesc;
-      Datum values[2];
-      bool nulls[2] = {false, false};
-      if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
-        elog(ERROR, "return type must be a row type");
-
-      values[0] = Int32GetDatum(pg_strtoint32(PQgetvalue(res, 0, 0)));
-      values[1] = Int32GetDatum(pg_strtoint32(PQgetvalue(res, 0, 1)));
+      auto count = Int32GetDatum(pg_strtoint32(PQgetvalue(res, 0, 0)));
 
       libpqsrv_disconnect(conn);
       remoteConnHash[cidx]->conn = NULL;
       remoteConnHash[cidx]->used = false;
 
-      PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
+      PG_RETURN_INT32(count);
     }
   }
   elog(ERROR, "unexpected error for tpch_async_consum");

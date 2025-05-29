@@ -27,12 +27,18 @@ INSERT INTO tpch.tpch_tables(table_name, status, weight) VALUES ('nation', 0, 1)
 INSERT INTO tpch.tpch_tables(table_name, status, weight) VALUES ('region', 0, 1);
 INSERT INTO tpch.tpch_tables(table_name, status, weight) VALUES ('supplier', 0, 1);
 
-INSERT INTO tpch.tpch_tables(table_name, status, weight) VALUES ('orders', 0, 4);
-INSERT INTO tpch.tpch_tables(table_name, status, weight) VALUES ('lineitem', 0, 6);
+INSERT INTO tpch.tpch_tables(table_name, status, weight) VALUES ('orders', 0, 1);
+INSERT INTO tpch.tpch_tables(table_name, status, weight) VALUES ('lineitem', 0, 1);
 
 INSERT INTO tpch.tpch_tables(table_name, status, weight) VALUES ('part', 0, 1);
-INSERT INTO tpch.tpch_tables(table_name, status, weight) VALUES ('partsupp', 0, 2);
+INSERT INTO tpch.tpch_tables(table_name, status, weight) VALUES ('partsupp', 0, 1);
 
 
 CREATE TABLE tpch.tpch_host_info(host_core INT);
 INSERT INTO tpch.tpch_host_info(host_core) VALUES (16);
+update tpch.tpch_host_info set host_core = 8;
+update tpch.tpch_host_info set host_core = 8;
+update tpch.tpch_host_info set host_core = 8;
+update tpch.tpch_host_info set host_core = 8;
+update tpch.tpch_host_info set host_core = 8;
+update tpch.tpch_host_info set host_core = 8;
