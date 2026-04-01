@@ -7,8 +7,18 @@ mod utils;
 macro_rules! define_tpch_loader {
     ($fn_name:ident, $table:literal, $generator:path) => {
         #[pg_extern]
-        fn $fn_name(scale_factor: default!(f64, 1.0)) -> i64 {
-            loader::load_rows($table, <$generator>::new(scale_factor, 1, 1).iter())
+        fn $fn_name(
+            scale_factor: default!(f64, 1.0),
+        ) -> TableIterator<
+            'static,
+            (
+                name!(rows, i64),
+                name!(heap_time_ms, f64),
+                name!(reindex_time_ms, f64),
+            ),
+        > {
+            let result = loader::load_rows($table, <$generator>::new(scale_factor, 1, 1).iter());
+            TableIterator::once((result.rows, result.heap_time_ms, result.reindex_time_ms))
         }
     };
 }
@@ -80,8 +90,8 @@ mod tests {
         )
         .unwrap();
 
-        let inserted = crate::generate_nation(1.0);
-        assert_eq!(25, inserted);
+        let result: Vec<_> = crate::generate_nation(1.0).collect();
+        assert_eq!(25, result[0].0);
 
         let count = Spi::get_one::<i64>("SELECT count(*) FROM nation")
             .unwrap()
@@ -119,8 +129,8 @@ mod tests {
         )
         .unwrap();
 
-        let inserted = crate::generate_nation(1.0);
-        assert_eq!(25, inserted);
+        let result: Vec<_> = crate::generate_nation(1.0).collect();
+        assert_eq!(25, result[0].0);
 
         let count = Spi::get_one::<i64>("SELECT count(*) FROM nation")
             .unwrap()
@@ -149,8 +159,8 @@ mod tests {
         )
         .unwrap();
 
-        let inserted = crate::generate_nation(1.0);
-        assert_eq!(25, inserted);
+        let result: Vec<_> = crate::generate_nation(1.0).collect();
+        assert_eq!(25, result[0].0);
 
         let current_xid = Spi::get_one::<i64>("SELECT (txid_current() % 4294967296)::bigint")
             .unwrap()
@@ -187,8 +197,8 @@ mod tests {
         )
         .unwrap();
 
-        let inserted = crate::generate_region(1.0);
-        assert_eq!(5, inserted);
+        let result: Vec<_> = crate::generate_region(1.0).collect();
+        assert_eq!(5, result[0].0);
 
         let count = Spi::get_one::<i64>("SELECT count(*) FROM region")
             .unwrap()
@@ -229,8 +239,8 @@ mod tests {
         )
         .unwrap();
 
-        let inserted = crate::generate_supplier(0.01);
-        assert_eq!(100, inserted);
+        let result: Vec<_> = crate::generate_supplier(0.01).collect();
+        assert_eq!(100, result[0].0);
 
         let count = Spi::get_one::<i64>("SELECT count(*) FROM supplier")
             .unwrap()
@@ -272,8 +282,8 @@ mod tests {
         )
         .unwrap();
 
-        let inserted = crate::generate_orders(0.0001);
-        assert_eq!(150, inserted);
+        let result: Vec<_> = crate::generate_orders(0.0001).collect();
+        assert_eq!(150, result[0].0);
 
         let count = Spi::get_one::<i64>("SELECT count(*) FROM orders")
             .unwrap()
@@ -319,8 +329,8 @@ mod tests {
         )
         .unwrap();
 
-        let inserted = crate::generate_part(scale_factor);
-        assert_eq!(200, inserted);
+        let result: Vec<_> = crate::generate_part(scale_factor).collect();
+        assert_eq!(200, result[0].0);
 
         let count = Spi::get_one::<i64>("SELECT count(*) FROM part")
             .unwrap()
@@ -365,8 +375,8 @@ mod tests {
         )
         .unwrap();
 
-        let inserted = crate::generate_customer(scale_factor);
-        assert_eq!(150, inserted);
+        let result: Vec<_> = crate::generate_customer(scale_factor).collect();
+        assert_eq!(150, result[0].0);
 
         let count = Spi::get_one::<i64>("SELECT count(*) FROM customer")
             .unwrap()
@@ -408,8 +418,8 @@ mod tests {
         )
         .unwrap();
 
-        let inserted = crate::generate_partsupp(scale_factor);
-        assert_eq!(800, inserted);
+        let result: Vec<_> = crate::generate_partsupp(scale_factor).collect();
+        assert_eq!(800, result[0].0);
 
         let count = Spi::get_one::<i64>("SELECT count(*) FROM partsupp")
             .unwrap()
@@ -465,8 +475,8 @@ mod tests {
         )
         .unwrap();
 
-        let inserted = crate::generate_lineitem(scale_factor);
-        assert_eq!(expected_rows, inserted);
+        let result: Vec<_> = crate::generate_lineitem(scale_factor).collect();
+        assert_eq!(expected_rows, result[0].0);
 
         let count = Spi::get_one::<i64>("SELECT count(*) FROM lineitem")
             .unwrap()

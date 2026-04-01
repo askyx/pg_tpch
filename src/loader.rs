@@ -1,13 +1,15 @@
 use std::{
     cmp::min,
     io::{Seek, SeekFrom, Write},
+    time::Instant,
 };
 
 use pgrx::{
     datum::Date,
     direct_function_call,
     pg_sys::{
-        self, BlockNumber, ForkNumber::MAIN_FORKNUM, HeapTuple, Page, Pointer, BLCKSZ, RELSEG_SIZE,
+        self, BlockNumber, ForkNumber::MAIN_FORKNUM, HeapTuple, MemoryContext, Page, Pointer,
+        BLCKSZ, RELSEG_SIZE,
     },
     AnyNumeric, IntoDatum, PgList, PgRelation, Spi,
 };
@@ -20,10 +22,16 @@ use tpchgen::{
 const MAX_BLOCK_NUMBER: BlockNumber = 1024;
 
 pub(crate) trait TpchTuple {
-    fn into_datums(self) -> Vec<pg_sys::Datum>;
+    fn write_datums(&self, datums: &mut [pg_sys::Datum]);
 }
 
-pub(crate) fn load_rows<R, I>(table: &str, rows: I) -> i64
+pub(crate) struct LoadResult {
+    pub rows: i64,
+    pub heap_time_ms: f64,
+    pub reindex_time_ms: f64,
+}
+
+pub(crate) fn load_rows<R, I>(table: &str, rows: I) -> LoadResult
 where
     R: TpchTuple,
     I: IntoIterator<Item = R>,
@@ -40,6 +48,12 @@ pub(crate) struct Loader {
     relation: PgRelation,
     has_indexes: bool,
     current_file: Option<std::fs::File>,
+    memctx: MemoryContext,
+    xid: pg_sys::TransactionId,
+    cid: pg_sys::CommandId,
+    datums: Vec<pg_sys::Datum>,
+    nulls: Vec<bool>,
+    wal_logged: bool,
 }
 
 impl Loader {
@@ -47,6 +61,18 @@ impl Loader {
         let relation = Self::open_target_relation(table);
         Self::validate_target_relation(&relation);
         let has_indexes = Self::relation_has_indexes(&relation);
+
+        let natts = unsafe { (*relation.tuple_desc().as_ptr()).natts as usize };
+
+        let memctx = unsafe {
+            pg_sys::AllocSetContextCreateInternal(
+                pg_sys::CurrentMemoryContext,
+                b"tpch_tuple_memctx\0".as_ptr() as *const std::ffi::c_char,
+                pg_sys::ALLOCSET_DEFAULT_MINSIZE as usize,
+                pg_sys::ALLOCSET_DEFAULT_INITSIZE as usize,
+                pg_sys::ALLOCSET_DEFAULT_MAXSIZE as usize,
+            )
+        };
 
         let loader = Loader {
             buffer_pool: unsafe { pg_sys::palloc((BLCKSZ * MAX_BLOCK_NUMBER) as usize) as Pointer },
@@ -58,6 +84,12 @@ impl Loader {
             relation,
             has_indexes,
             current_file: None,
+            memctx,
+            xid: unsafe { pg_sys::GetCurrentTransactionId() },
+            cid: unsafe { pg_sys::GetCurrentCommandId(true) },
+            datums: vec![pg_sys::Datum::from(0); natts],
+            nulls: vec![false; natts],
+            wal_logged: false,
         };
 
         unsafe { Self::init_page(loader.get_current_page()) };
@@ -90,11 +122,12 @@ impl Loader {
         !index_list.is_empty()
     }
 
-    pub fn generate_rows_and_load<R, I>(&mut self, rows: I) -> i64
+    pub fn generate_rows_and_load<R, I>(&mut self, rows: I) -> LoadResult
     where
         R: TpchTuple,
         I: IntoIterator<Item = R>,
     {
+        let heap_start = Instant::now();
         let mut inserted = 0_i64;
         unsafe {
             for row in rows {
@@ -103,12 +136,19 @@ impl Loader {
             }
             self.flush();
         }
+        let heap_time_ms = heap_start.elapsed().as_secs_f64() * 1000.0;
 
+        let reindex_start = Instant::now();
         if self.has_indexes {
             self.reindex_target_relation();
         }
+        let reindex_time_ms = reindex_start.elapsed().as_secs_f64() * 1000.0;
 
-        inserted
+        LoadResult {
+            rows: inserted,
+            heap_time_ms,
+            reindex_time_ms,
+        }
     }
 
     fn reindex_target_relation(&self) {
@@ -162,33 +202,41 @@ impl Loader {
     }
 
     unsafe fn load_row<R: TpchTuple>(&mut self, row: R) {
-        let tuple = Self::tuple_from_row(&self.relation, row);
-        self.load_tuple(tuple);
-    }
+        let old_ctx = pg_sys::MemoryContextSwitchTo(self.memctx);
 
-    fn tuple_from_row<R: TpchTuple>(rel: &PgRelation, row: R) -> HeapTuple {
-        let mut datums = row.into_datums();
-        let mut nulls = vec![false; datums.len()];
+        row.write_datums(&mut self.datums);
+        for n in &mut self.nulls {
+            *n = false;
+        }
 
-        unsafe {
-            pg_sys::heap_form_tuple(
-                rel.tuple_desc().as_ptr(),
-                datums.as_mut_ptr(),
-                nulls.as_mut_ptr(),
-            )
+        let tuple = pg_sys::heap_form_tuple(
+            self.relation.tuple_desc().as_ptr(),
+            self.datums.as_mut_ptr(),
+            self.nulls.as_mut_ptr(),
+        );
+
+        let switched = self.load_tuple(tuple);
+        pg_sys::heap_freetuple(tuple);
+
+        pg_sys::MemoryContextSwitchTo(old_ctx);
+
+        if switched {
+            pg_sys::MemoryContextReset(self.memctx);
         }
     }
 
-    unsafe fn load_tuple(&mut self, tuple: HeapTuple) {
+    unsafe fn load_tuple(&mut self, tuple: HeapTuple) -> bool {
         let mut page = self.get_current_page();
-        if pg_sys::PageGetFreeSpace(page)
-            < (std::mem::size_of::<pg_sys::ItemIdData>()
-                + pg_sys::MAXALIGN((*tuple).t_len as usize)
-                + crate::utils::PGUtils::relation_get_target_page_free_space(
-                    &self.relation,
-                    pg_sys::HEAP_DEFAULT_FILLFACTOR,
-                ))
-        {
+        let tuple_size = std::mem::size_of::<pg_sys::ItemIdData>()
+            + pg_sys::MAXALIGN((*tuple).t_len as usize)
+            + crate::utils::PGUtils::relation_get_target_page_free_space(
+                &self.relation,
+                pg_sys::HEAP_DEFAULT_FILLFACTOR,
+            );
+
+        let mut switched = false;
+        if pg_sys::PageGetFreeSpace(page) < tuple_size {
+            switched = true;
             if self.current_page < MAX_BLOCK_NUMBER - 1 {
                 self.current_page += 1;
             } else {
@@ -205,14 +253,8 @@ impl Loader {
         (*values).t_infomask2 &= !(pg_sys::HEAP2_XACT_MASK as u16);
         (*values).t_infomask |= pg_sys::HEAP_XMAX_INVALID as u16;
 
-        crate::utils::PGUtils::heap_tuple_header_set_xmin(
-            values,
-            pg_sys::GetCurrentTransactionId(),
-        );
-        crate::utils::PGUtils::heap_tuple_header_set_cmin(
-            values,
-            pg_sys::GetCurrentCommandId(true),
-        );
+        crate::utils::PGUtils::heap_tuple_header_set_xmin(values, self.xid);
+        crate::utils::PGUtils::heap_tuple_header_set_cmin(values, self.cid);
         crate::utils::PGUtils::heap_tuple_header_set_xmax(values, pg_sys::TransactionId::from(0));
 
         let offset = pg_sys::PageAddItemExtended(
@@ -233,6 +275,7 @@ impl Loader {
         let item_id = pg_sys::PageGetItemId(page, offset);
         let item = pg_sys::PageGetItem(page, item_id) as pg_sys::HeapTupleHeader;
         (*item).t_ctid = tid;
+        switched
     }
 
     unsafe fn flush(&mut self) {
@@ -245,16 +288,19 @@ impl Loader {
             return;
         }
 
-        if self.total_blks == 0 {
-            let relation = self.relation.as_ptr();
-            let recptr = pg_sys::log_newpage(
+        let relation = self.relation.as_ptr();
+
+        if !self.wal_logged {
+            let blk_num = self.current_blk_num();
+            let page = self.get_target_page(0);
+            pg_sys::log_newpage(
                 &mut (*relation).rd_locator as *mut pg_sys::RelFileLocator,
                 MAIN_FORKNUM,
-                self.existing_blks,
-                self.get_current_page(),
+                blk_num,
+                page,
                 true,
             );
-            pg_sys::XLogFlush(recptr);
+            self.wal_logged = true;
         }
 
         let mut written_pages = 0;
@@ -291,7 +337,6 @@ impl Loader {
         self.total_blks += num_pages;
         self.close_rel_file();
 
-        let relation = self.relation.as_ptr();
         if !(*relation).rd_smgr.is_null() {
             (*(*relation).rd_smgr).smgr_cached_nblocks[MAIN_FORKNUM as usize] =
                 self.current_blk_num();
@@ -342,118 +387,102 @@ fn date_datum(value: TPCHDate) -> pg_sys::Datum {
 }
 
 impl TpchTuple for Nation<'_> {
-    fn into_datums(self) -> Vec<pg_sys::Datum> {
-        vec![
-            self.n_nationkey.into_datum().unwrap(),
-            text_datum(self.n_name),
-            self.n_regionkey.into_datum().unwrap(),
-            text_datum(self.n_comment),
-        ]
+    fn write_datums(&self, datums: &mut [pg_sys::Datum]) {
+        datums[0] = self.n_nationkey.into_datum().unwrap();
+        datums[1] = text_datum(self.n_name);
+        datums[2] = self.n_regionkey.into_datum().unwrap();
+        datums[3] = text_datum(self.n_comment);
     }
 }
 
 impl TpchTuple for Region<'_> {
-    fn into_datums(self) -> Vec<pg_sys::Datum> {
-        vec![
-            self.r_regionkey.into_datum().unwrap(),
-            text_datum(self.r_name),
-            text_datum(self.r_comment),
-        ]
+    fn write_datums(&self, datums: &mut [pg_sys::Datum]) {
+        datums[0] = self.r_regionkey.into_datum().unwrap();
+        datums[1] = text_datum(self.r_name);
+        datums[2] = text_datum(self.r_comment);
     }
 }
 
 impl TpchTuple for Part<'_> {
-    fn into_datums(self) -> Vec<pg_sys::Datum> {
-        vec![
-            self.p_partkey.into_datum().unwrap(),
-            text_datum(self.p_name),
-            text_datum(self.p_mfgr),
-            text_datum(self.p_brand),
-            text_datum(self.p_type),
-            self.p_size.into_datum().unwrap(),
-            text_datum(self.p_container),
-            decimal_datum(self.p_retailprice),
-            text_datum(self.p_comment),
-        ]
+    fn write_datums(&self, datums: &mut [pg_sys::Datum]) {
+        datums[0] = self.p_partkey.into_datum().unwrap();
+        datums[1] = text_datum(&self.p_name);
+        datums[2] = text_datum(&self.p_mfgr);
+        datums[3] = text_datum(&self.p_brand);
+        datums[4] = text_datum(&self.p_type);
+        datums[5] = self.p_size.into_datum().unwrap();
+        datums[6] = text_datum(&self.p_container);
+        datums[7] = decimal_datum(self.p_retailprice);
+        datums[8] = text_datum(&self.p_comment);
     }
 }
 
 impl TpchTuple for Supplier {
-    fn into_datums(self) -> Vec<pg_sys::Datum> {
-        vec![
-            self.s_suppkey.into_datum().unwrap(),
-            text_datum(self.s_name),
-            text_datum(self.s_address),
-            self.s_nationkey.into_datum().unwrap(),
-            text_datum(self.s_phone),
-            decimal_datum(self.s_acctbal),
-            text_datum(self.s_comment),
-        ]
+    fn write_datums(&self, datums: &mut [pg_sys::Datum]) {
+        datums[0] = self.s_suppkey.into_datum().unwrap();
+        datums[1] = text_datum(&self.s_name);
+        datums[2] = text_datum(&self.s_address);
+        datums[3] = self.s_nationkey.into_datum().unwrap();
+        datums[4] = text_datum(&self.s_phone);
+        datums[5] = decimal_datum(self.s_acctbal);
+        datums[6] = text_datum(&self.s_comment);
     }
 }
 
 impl TpchTuple for Customer<'_> {
-    fn into_datums(self) -> Vec<pg_sys::Datum> {
-        vec![
-            self.c_custkey.into_datum().unwrap(),
-            text_datum(self.c_name),
-            text_datum(self.c_address),
-            self.c_nationkey.into_datum().unwrap(),
-            text_datum(self.c_phone),
-            decimal_datum(self.c_acctbal),
-            text_datum(self.c_mktsegment),
-            text_datum(self.c_comment),
-        ]
+    fn write_datums(&self, datums: &mut [pg_sys::Datum]) {
+        datums[0] = self.c_custkey.into_datum().unwrap();
+        datums[1] = text_datum(&self.c_name);
+        datums[2] = text_datum(&self.c_address);
+        datums[3] = self.c_nationkey.into_datum().unwrap();
+        datums[4] = text_datum(&self.c_phone);
+        datums[5] = decimal_datum(self.c_acctbal);
+        datums[6] = text_datum(&self.c_mktsegment);
+        datums[7] = text_datum(&self.c_comment);
     }
 }
 
 impl TpchTuple for PartSupp<'_> {
-    fn into_datums(self) -> Vec<pg_sys::Datum> {
-        vec![
-            self.ps_partkey.into_datum().unwrap(),
-            self.ps_suppkey.into_datum().unwrap(),
-            self.ps_availqty.into_datum().unwrap(),
-            decimal_datum(self.ps_supplycost),
-            text_datum(self.ps_comment),
-        ]
+    fn write_datums(&self, datums: &mut [pg_sys::Datum]) {
+        datums[0] = self.ps_partkey.into_datum().unwrap();
+        datums[1] = self.ps_suppkey.into_datum().unwrap();
+        datums[2] = self.ps_availqty.into_datum().unwrap();
+        datums[3] = decimal_datum(self.ps_supplycost);
+        datums[4] = text_datum(self.ps_comment);
     }
 }
 
 impl TpchTuple for Order<'_> {
-    fn into_datums(self) -> Vec<pg_sys::Datum> {
-        vec![
-            self.o_orderkey.into_datum().unwrap(),
-            self.o_custkey.into_datum().unwrap(),
-            text_datum(self.o_orderstatus.as_str()),
-            decimal_datum(self.o_totalprice),
-            date_datum(self.o_orderdate),
-            text_datum(self.o_orderpriority),
-            text_datum(self.o_clerk),
-            self.o_shippriority.into_datum().unwrap(),
-            text_datum(self.o_comment),
-        ]
+    fn write_datums(&self, datums: &mut [pg_sys::Datum]) {
+        datums[0] = self.o_orderkey.into_datum().unwrap();
+        datums[1] = self.o_custkey.into_datum().unwrap();
+        datums[2] = text_datum(self.o_orderstatus.as_str());
+        datums[3] = decimal_datum(self.o_totalprice);
+        datums[4] = date_datum(self.o_orderdate);
+        datums[5] = text_datum(self.o_orderpriority);
+        datums[6] = text_datum(self.o_clerk);
+        datums[7] = self.o_shippriority.into_datum().unwrap();
+        datums[8] = text_datum(self.o_comment);
     }
 }
 
 impl TpchTuple for LineItem<'_> {
-    fn into_datums(self) -> Vec<pg_sys::Datum> {
-        vec![
-            self.l_orderkey.into_datum().unwrap(),
-            self.l_partkey.into_datum().unwrap(),
-            self.l_suppkey.into_datum().unwrap(),
-            self.l_linenumber.into_datum().unwrap(),
-            numeric_datum(self.l_quantity),
-            decimal_datum(self.l_extendedprice),
-            decimal_datum(self.l_discount),
-            decimal_datum(self.l_tax),
-            text_datum(self.l_returnflag),
-            text_datum(self.l_linestatus),
-            date_datum(self.l_shipdate),
-            date_datum(self.l_commitdate),
-            date_datum(self.l_receiptdate),
-            text_datum(self.l_shipinstruct),
-            text_datum(self.l_shipmode),
-            text_datum(self.l_comment),
-        ]
+    fn write_datums(&self, datums: &mut [pg_sys::Datum]) {
+        datums[0] = self.l_orderkey.into_datum().unwrap();
+        datums[1] = self.l_partkey.into_datum().unwrap();
+        datums[2] = self.l_suppkey.into_datum().unwrap();
+        datums[3] = self.l_linenumber.into_datum().unwrap();
+        datums[4] = numeric_datum(self.l_quantity);
+        datums[5] = decimal_datum(self.l_extendedprice);
+        datums[6] = decimal_datum(self.l_discount);
+        datums[7] = decimal_datum(self.l_tax);
+        datums[8] = text_datum(self.l_returnflag);
+        datums[9] = text_datum(self.l_linestatus);
+        datums[10] = date_datum(self.l_shipdate);
+        datums[11] = date_datum(self.l_commitdate);
+        datums[12] = date_datum(self.l_receiptdate);
+        datums[13] = text_datum(self.l_shipinstruct);
+        datums[14] = text_datum(self.l_shipmode);
+        datums[15] = text_datum(self.l_comment);
     }
 }
