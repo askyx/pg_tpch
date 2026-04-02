@@ -1,6 +1,7 @@
 use pgrx::prelude::*;
 ::pgrx::pg_module_magic!();
 
+mod encoding;
 mod loader;
 mod utils;
 
@@ -68,10 +69,14 @@ fn hello_pg_tpchrs() -> &'static str {
 #[cfg(any(test, feature = "pg_test"))]
 #[pg_schema]
 mod tests {
+    use std::ffi::CString;
+
     use pgrx::prelude::*;
     use tpchgen::generators::{
-        CustomerGenerator, LineItemGenerator, OrderGenerator, PartGenerator, PartSuppGenerator,
+        ClerkName, CustomerGenerator, CustomerName, LineItemGenerator, OrderGenerator,
+        PartBrandName, PartGenerator, PartManufacturerName, PartSuppGenerator, SupplierName,
     };
+    use tpchgen::{dates::TPCHDate, decimal::TPCHDecimal};
 
     #[pg_test]
     fn test_hello_pg_tpchrs() {
@@ -265,7 +270,12 @@ mod tests {
 
     #[pg_test]
     fn test_generate_orders_loads_dates_and_prices() {
-        let expected_first_order = OrderGenerator::new(0.0001, 1, 1).iter().next().unwrap();
+        let scale_factor = 0.01;
+        let expected_rows = OrderGenerator::new(scale_factor, 1, 1).iter().count() as i64;
+        let expected_first_order = OrderGenerator::new(scale_factor, 1, 1)
+            .iter()
+            .next()
+            .unwrap();
 
         Spi::run(
             "CREATE TABLE orders (
@@ -282,13 +292,13 @@ mod tests {
         )
         .unwrap();
 
-        let result: Vec<_> = crate::generate_orders(0.0001).collect();
-        assert_eq!(150, result[0].0);
+        let result: Vec<_> = crate::generate_orders(scale_factor).collect();
+        assert_eq!(expected_rows, result[0].0);
 
         let count = Spi::get_one::<i64>("SELECT count(*) FROM orders")
             .unwrap()
             .unwrap();
-        assert_eq!(150, count);
+        assert_eq!(expected_rows, count);
 
         let first = Spi::get_three::<String, String, String>(
             "SELECT o_orderstatus, o_totalprice::text, o_orderdate::text
@@ -308,7 +318,8 @@ mod tests {
 
     #[pg_test]
     fn test_generate_part_loads_numeric_columns() {
-        let scale_factor = 0.001;
+        let scale_factor = 0.01;
+        let expected_rows = PartGenerator::new(scale_factor, 1, 1).iter().count() as i64;
         let expected_first_part = PartGenerator::new(scale_factor, 1, 1)
             .iter()
             .next()
@@ -330,12 +341,12 @@ mod tests {
         .unwrap();
 
         let result: Vec<_> = crate::generate_part(scale_factor).collect();
-        assert_eq!(200, result[0].0);
+        assert_eq!(expected_rows, result[0].0);
 
         let count = Spi::get_one::<i64>("SELECT count(*) FROM part")
             .unwrap()
             .unwrap();
-        assert_eq!(200, count);
+        assert_eq!(expected_rows, count);
 
         let first = Spi::get_three::<String, String, String>(
             "SELECT p_name, p_brand, p_retailprice::text
@@ -355,7 +366,8 @@ mod tests {
 
     #[pg_test]
     fn test_generate_customer_loads_numeric_columns() {
-        let scale_factor = 0.001;
+        let scale_factor = 0.01;
+        let expected_rows = CustomerGenerator::new(scale_factor, 1, 1).iter().count() as i64;
         let expected_first_customer = CustomerGenerator::new(scale_factor, 1, 1)
             .iter()
             .next()
@@ -376,12 +388,12 @@ mod tests {
         .unwrap();
 
         let result: Vec<_> = crate::generate_customer(scale_factor).collect();
-        assert_eq!(150, result[0].0);
+        assert_eq!(expected_rows, result[0].0);
 
         let count = Spi::get_one::<i64>("SELECT count(*) FROM customer")
             .unwrap()
             .unwrap();
-        assert_eq!(150, count);
+        assert_eq!(expected_rows, count);
 
         let first = Spi::get_three::<String, String, String>(
             "SELECT c_name, c_mktsegment, c_acctbal::text
@@ -401,7 +413,8 @@ mod tests {
 
     #[pg_test]
     fn test_generate_partsupp_loads_supplycost() {
-        let scale_factor = 0.001;
+        let scale_factor = 0.01;
+        let expected_rows = PartSuppGenerator::new(scale_factor, 1, 1).iter().count() as i64;
         let expected_first_partsupp = PartSuppGenerator::new(scale_factor, 1, 1)
             .iter()
             .next()
@@ -419,12 +432,12 @@ mod tests {
         .unwrap();
 
         let result: Vec<_> = crate::generate_partsupp(scale_factor).collect();
-        assert_eq!(800, result[0].0);
+        assert_eq!(expected_rows, result[0].0);
 
         let count = Spi::get_one::<i64>("SELECT count(*) FROM partsupp")
             .unwrap()
             .unwrap();
-        assert_eq!(800, count);
+        assert_eq!(expected_rows, count);
 
         let first = Spi::get_three::<i64, i32, String>(
             "SELECT ps_suppkey, ps_availqty, ps_supplycost::text
@@ -446,7 +459,7 @@ mod tests {
 
     #[pg_test]
     fn test_generate_lineitem_loads_numeric_and_date_columns() {
-        let scale_factor = 0.0001;
+        let scale_factor = 0.01;
         let expected_rows = LineItemGenerator::new(scale_factor, 1, 1).iter().count() as i64;
         let expected_first_lineitem = LineItemGenerator::new(scale_factor, 1, 1)
             .iter()
@@ -497,6 +510,227 @@ mod tests {
             ),
             first
         );
+    }
+
+    unsafe fn copy_varlena_bytes_from_datum(datum: pg_sys::Datum) -> Vec<u8> {
+        let ptr = datum.cast_mut_ptr::<u8>();
+        #[cfg(target_endian = "little")]
+        let len = ((ptr.cast::<u32>().read_unaligned() >> 2) & 0x3fff_ffff) as usize;
+        #[cfg(target_endian = "big")]
+        let len = (ptr.cast::<u32>().read_unaligned() & 0x3fff_ffff) as usize;
+
+        std::slice::from_raw_parts(ptr as *const u8, len).to_vec()
+    }
+
+    fn scaled_i64_to_numeric_input(value: i64, dscale: u16) -> String {
+        if dscale == 0 {
+            return value.to_string();
+        }
+
+        let negative = value < 0;
+        let digits = value.unsigned_abs().to_string();
+        let split_at = digits.len().saturating_sub(dscale as usize);
+
+        let mut out = String::new();
+        if negative {
+            out.push('-');
+        }
+
+        if split_at == 0 {
+            out.push('0');
+        } else {
+            out.push_str(&digits[..split_at]);
+        }
+
+        out.push('.');
+
+        if split_at == 0 {
+            out.push_str(&"0".repeat(dscale as usize - digits.len()));
+            out.push_str(&digits);
+        } else {
+            out.push_str(&digits[split_at..]);
+        }
+
+        out
+    }
+
+    #[pg_test]
+    fn test_text_encoding_matches_textin() {
+        let cases = ["", "R", "MAIL", "ship comment 123"];
+
+        unsafe {
+            for case in cases {
+                let cstr = CString::new(case).unwrap();
+                let reference = pgrx::direct_function_call::<pg_sys::Datum>(
+                    pg_sys::textin,
+                    &[Some(pg_sys::Datum::from(cstr.as_ptr() as usize))],
+                )
+                .unwrap();
+
+                let expected = copy_varlena_bytes_from_datum(reference);
+                let actual = crate::encoding::encode_text_bytes(case);
+
+                assert_eq!(expected, actual, "text encoding mismatch for {case:?}");
+                pg_sys::pfree(reference.cast_mut_ptr());
+            }
+        }
+    }
+
+    #[pg_test]
+    fn test_formatted_text_encoding_matches_textin() {
+        let cases = [
+            PartManufacturerName::new(3).to_string(),
+            PartBrandName::new(13).to_string(),
+            SupplierName::new(1).to_string(),
+            CustomerName::new(42).to_string(),
+            ClerkName::new(951).to_string(),
+        ];
+
+        unsafe {
+            for case in cases {
+                let cstr = CString::new(case.clone()).unwrap();
+                let reference = pgrx::direct_function_call::<pg_sys::Datum>(
+                    pg_sys::textin,
+                    &[Some(pg_sys::Datum::from(cstr.as_ptr() as usize))],
+                )
+                .unwrap();
+
+                let expected = copy_varlena_bytes_from_datum(reference);
+                let actual = crate::encoding::encode_text_display_bytes(&case);
+
+                assert_eq!(expected, actual, "text encoding mismatch for {case:?}");
+                pg_sys::pfree(reference.cast_mut_ptr());
+            }
+        }
+    }
+
+    #[pg_test]
+    fn test_integer_numeric_encoding_matches_numeric_in() {
+        let cases = [0_i64, 1, 50, 10_000, -1, -10_000, 9_999_999_999];
+
+        unsafe {
+            for case in cases {
+                let cstr = CString::new(case.to_string()).unwrap();
+                let reference = pgrx::direct_function_call::<pg_sys::Datum>(
+                    pg_sys::numeric_in,
+                    &[
+                        Some(pg_sys::Datum::from(cstr.as_ptr() as usize)),
+                        Some(pg_sys::Datum::from(pg_sys::InvalidOid)),
+                        Some((-1_i32).into_datum().unwrap()),
+                    ],
+                )
+                .unwrap();
+
+                let expected = copy_varlena_bytes_from_datum(reference);
+                let actual = crate::encoding::encode_numeric_i64_bytes(case);
+
+                assert_eq!(expected, actual, "numeric encoding mismatch for {case}");
+                pg_sys::pfree(reference.cast_mut_ptr());
+            }
+        }
+    }
+
+    #[pg_test]
+    fn test_scaled_numeric_encoding_matches_numeric_in() {
+        let cases = [
+            TPCHDecimal::new(0),
+            TPCHDecimal::new(1),
+            TPCHDecimal::new(10),
+            TPCHDecimal::new(1234),
+            TPCHDecimal::new(-1234),
+            TPCHDecimal::new(999_999_999_999),
+        ];
+
+        unsafe {
+            for case in cases {
+                let text = case.to_string();
+                let cstr = CString::new(text.clone()).unwrap();
+                let reference = pgrx::direct_function_call::<pg_sys::Datum>(
+                    pg_sys::numeric_in,
+                    &[
+                        Some(pg_sys::Datum::from(cstr.as_ptr() as usize)),
+                        Some(pg_sys::Datum::from(pg_sys::InvalidOid)),
+                        Some((-1_i32).into_datum().unwrap()),
+                    ],
+                )
+                .unwrap();
+
+                let expected = copy_varlena_bytes_from_datum(reference);
+                let actual =
+                    crate::encoding::encode_numeric_i64_with_dscale_2_bytes(case.into_inner());
+
+                assert_eq!(
+                    expected, actual,
+                    "scaled numeric encoding mismatch for {text}"
+                );
+                pg_sys::pfree(reference.cast_mut_ptr());
+            }
+        }
+    }
+
+    #[pg_test]
+    fn test_generic_scaled_numeric_encoding_matches_numeric_in() {
+        let cases = [
+            (0_i64, 0_u16),
+            (1, 0),
+            (1234, 2),
+            (-1234, 2),
+            (1, 5),
+            (12345, 5),
+            (1, 6),
+            (-987_654, 3),
+            (123_450_000, 6),
+            (1, 10),
+        ];
+
+        unsafe {
+            for (value, dscale) in cases {
+                let text = scaled_i64_to_numeric_input(value, dscale);
+                let cstr = CString::new(text.clone()).unwrap();
+                let reference = pgrx::direct_function_call::<pg_sys::Datum>(
+                    pg_sys::numeric_in,
+                    &[
+                        Some(pg_sys::Datum::from(cstr.as_ptr() as usize)),
+                        Some(pg_sys::Datum::from(pg_sys::InvalidOid)),
+                        Some((-1_i32).into_datum().unwrap()),
+                    ],
+                )
+                .unwrap();
+
+                let expected = copy_varlena_bytes_from_datum(reference);
+                let actual = crate::encoding::encode_numeric_i64_with_scale_bytes(value, dscale);
+
+                assert_eq!(
+                    expected, actual,
+                    "scaled numeric encoding mismatch for {text}"
+                );
+                pg_sys::pfree(reference.cast_mut_ptr());
+            }
+        }
+    }
+
+    #[pg_test]
+    fn test_tpch_date_encoding_matches_make_date() {
+        let cases = [
+            TPCHDate::new(tpchgen::dates::MIN_GENERATE_DATE),
+            TPCHDate::new(tpchgen::dates::MIN_GENERATE_DATE + 41),
+            TPCHDate::new(tpchgen::dates::MIN_GENERATE_DATE + 2556),
+        ];
+
+        for case in cases {
+            let (year, month, day) = case.to_ymd();
+            let reference = pgrx::datum::Date::new(1900 + year, month as u8, day as u8)
+                .unwrap()
+                .into_datum()
+                .unwrap();
+            let actual = crate::encoding::date_datum(case);
+
+            assert_eq!(
+                reference.value(),
+                actual.value(),
+                "date encoding mismatch for {case}"
+            );
+        }
     }
 }
 

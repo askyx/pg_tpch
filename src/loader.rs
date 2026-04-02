@@ -1,23 +1,19 @@
 use std::{
     cmp::min,
+    fs,
     io::{Seek, SeekFrom, Write},
     time::Instant,
 };
 
 use pgrx::{
-    datum::Date,
     direct_function_call,
     pg_sys::{
         self, BlockNumber, ForkNumber::MAIN_FORKNUM, HeapTuple, MemoryContext, Page, Pointer,
         BLCKSZ, RELSEG_SIZE,
     },
-    AnyNumeric, IntoDatum, PgList, PgRelation, Spi,
+    IntoDatum, PgList, PgRelation, Spi,
 };
-use tpchgen::{
-    dates::TPCHDate,
-    decimal::TPCHDecimal,
-    generators::{Customer, LineItem, Nation, Order, Part, PartSupp, Region, Supplier},
-};
+use tpchgen::generators::{Customer, LineItem, Nation, Order, Part, PartSupp, Region, Supplier};
 
 const MAX_BLOCK_NUMBER: BlockNumber = 1024;
 
@@ -154,7 +150,48 @@ impl Loader {
     fn reindex_target_relation(&self) {
         let qualified_name =
             pgrx::spi::quote_qualified_identifier(self.relation.namespace(), self.relation.name());
+        for (name, value) in Self::aggressive_reindex_settings() {
+            Spi::run(&format!("SET LOCAL {name} = '{value}'")).unwrap();
+        }
         Spi::run(&format!("REINDEX TABLE {qualified_name}")).unwrap();
+    }
+
+    fn aggressive_reindex_settings() -> Vec<(&'static str, String)> {
+        let parallelism = std::thread::available_parallelism()
+            .map(|value| value.get())
+            .unwrap_or(4);
+        let parallel_maintenance_workers = parallelism.saturating_sub(1).clamp(1, 8);
+        let max_parallel_workers = parallelism.clamp(1, 16);
+        let maintenance_work_mem_mb = Self::recommended_maintenance_work_mem_mb();
+        let io_concurrency = if cfg!(target_family = "unix") { 256 } else { 0 };
+
+        vec![
+            (
+                "maintenance_work_mem",
+                format!("{maintenance_work_mem_mb}MB"),
+            ),
+            (
+                "max_parallel_maintenance_workers",
+                parallel_maintenance_workers.to_string(),
+            ),
+            ("max_parallel_workers", max_parallel_workers.to_string()),
+            ("maintenance_io_concurrency", io_concurrency.to_string()),
+            ("effective_io_concurrency", io_concurrency.to_string()),
+            ("parallel_leader_participation", "on".to_string()),
+            ("synchronous_commit", "off".to_string()),
+        ]
+    }
+
+    fn recommended_maintenance_work_mem_mb() -> usize {
+        let total_mb = Self::detect_total_memory_mb().unwrap_or(4096);
+        (total_mb / 3).clamp(1024, 8192)
+    }
+
+    fn detect_total_memory_mb() -> Option<usize> {
+        let meminfo = fs::read_to_string("/proc/meminfo").ok()?;
+        let line = meminfo.lines().find(|line| line.starts_with("MemTotal:"))?;
+        let kb = line.split_whitespace().nth(1)?.parse::<usize>().ok()?;
+        Some(kb / 1024)
     }
 
     fn close_rel_file(&mut self) {
@@ -364,81 +401,59 @@ impl Loader {
     }
 }
 
-fn text_datum(value: impl ToString) -> pg_sys::Datum {
-    value.to_string().into_datum().unwrap()
-}
-
-fn decimal_datum(value: TPCHDecimal) -> pg_sys::Datum {
-    let numeric = AnyNumeric::try_from(value.to_string().as_str()).unwrap();
-    numeric.into_datum().unwrap()
-}
-
-fn numeric_datum(value: impl ToString) -> pg_sys::Datum {
-    let numeric = AnyNumeric::try_from(value.to_string().as_str()).unwrap();
-    numeric.into_datum().unwrap()
-}
-
-fn date_datum(value: TPCHDate) -> pg_sys::Datum {
-    let (year, month, day) = value.to_ymd();
-    Date::new(1900 + year, month as u8, day as u8)
-        .unwrap()
-        .into_datum()
-        .unwrap()
-}
-
 impl TpchTuple for Nation<'_> {
     fn write_datums(&self, datums: &mut [pg_sys::Datum]) {
         datums[0] = self.n_nationkey.into_datum().unwrap();
-        datums[1] = text_datum(self.n_name);
+        datums[1] = crate::encoding::text_datum_str(self.n_name);
         datums[2] = self.n_regionkey.into_datum().unwrap();
-        datums[3] = text_datum(self.n_comment);
+        datums[3] = crate::encoding::text_datum_str(self.n_comment);
     }
 }
 
 impl TpchTuple for Region<'_> {
     fn write_datums(&self, datums: &mut [pg_sys::Datum]) {
         datums[0] = self.r_regionkey.into_datum().unwrap();
-        datums[1] = text_datum(self.r_name);
-        datums[2] = text_datum(self.r_comment);
+        datums[1] = crate::encoding::text_datum_str(self.r_name);
+        datums[2] = crate::encoding::text_datum_str(self.r_comment);
     }
 }
 
 impl TpchTuple for Part<'_> {
     fn write_datums(&self, datums: &mut [pg_sys::Datum]) {
         datums[0] = self.p_partkey.into_datum().unwrap();
-        datums[1] = text_datum(&self.p_name);
-        datums[2] = text_datum(&self.p_mfgr);
-        datums[3] = text_datum(&self.p_brand);
-        datums[4] = text_datum(&self.p_type);
+        datums[1] = crate::encoding::text_datum(&self.p_name);
+        datums[2] = crate::encoding::text_datum(&self.p_mfgr);
+        datums[3] = crate::encoding::text_datum(&self.p_brand);
+        datums[4] = crate::encoding::text_datum_str(self.p_type);
         datums[5] = self.p_size.into_datum().unwrap();
-        datums[6] = text_datum(&self.p_container);
-        datums[7] = decimal_datum(self.p_retailprice);
-        datums[8] = text_datum(&self.p_comment);
+        datums[6] = crate::encoding::text_datum_str(self.p_container);
+        datums[7] = crate::encoding::decimal_numeric_datum(self.p_retailprice);
+        datums[8] = crate::encoding::text_datum_str(self.p_comment);
     }
 }
 
 impl TpchTuple for Supplier {
     fn write_datums(&self, datums: &mut [pg_sys::Datum]) {
         datums[0] = self.s_suppkey.into_datum().unwrap();
-        datums[1] = text_datum(&self.s_name);
-        datums[2] = text_datum(&self.s_address);
+        datums[1] = crate::encoding::text_datum(&self.s_name);
+        datums[2] = crate::encoding::text_datum(&self.s_address);
         datums[3] = self.s_nationkey.into_datum().unwrap();
-        datums[4] = text_datum(&self.s_phone);
-        datums[5] = decimal_datum(self.s_acctbal);
-        datums[6] = text_datum(&self.s_comment);
+        datums[4] = crate::encoding::text_datum(&self.s_phone);
+        datums[5] = crate::encoding::decimal_numeric_datum(self.s_acctbal);
+        datums[6] = crate::encoding::text_datum_str(self.s_comment.as_str());
     }
 }
 
 impl TpchTuple for Customer<'_> {
     fn write_datums(&self, datums: &mut [pg_sys::Datum]) {
         datums[0] = self.c_custkey.into_datum().unwrap();
-        datums[1] = text_datum(&self.c_name);
-        datums[2] = text_datum(&self.c_address);
+        datums[1] = crate::encoding::text_datum(&self.c_name);
+        datums[2] = crate::encoding::text_datum(&self.c_address);
         datums[3] = self.c_nationkey.into_datum().unwrap();
-        datums[4] = text_datum(&self.c_phone);
-        datums[5] = decimal_datum(self.c_acctbal);
-        datums[6] = text_datum(&self.c_mktsegment);
-        datums[7] = text_datum(&self.c_comment);
+        datums[4] = crate::encoding::text_datum(&self.c_phone);
+        datums[5] = crate::encoding::decimal_numeric_datum(self.c_acctbal);
+        datums[6] = crate::encoding::text_datum_str(self.c_mktsegment);
+        datums[7] = crate::encoding::text_datum_str(self.c_comment);
     }
 }
 
@@ -447,8 +462,8 @@ impl TpchTuple for PartSupp<'_> {
         datums[0] = self.ps_partkey.into_datum().unwrap();
         datums[1] = self.ps_suppkey.into_datum().unwrap();
         datums[2] = self.ps_availqty.into_datum().unwrap();
-        datums[3] = decimal_datum(self.ps_supplycost);
-        datums[4] = text_datum(self.ps_comment);
+        datums[3] = crate::encoding::decimal_numeric_datum(self.ps_supplycost);
+        datums[4] = crate::encoding::text_datum_str(self.ps_comment);
     }
 }
 
@@ -456,13 +471,13 @@ impl TpchTuple for Order<'_> {
     fn write_datums(&self, datums: &mut [pg_sys::Datum]) {
         datums[0] = self.o_orderkey.into_datum().unwrap();
         datums[1] = self.o_custkey.into_datum().unwrap();
-        datums[2] = text_datum(self.o_orderstatus.as_str());
-        datums[3] = decimal_datum(self.o_totalprice);
-        datums[4] = date_datum(self.o_orderdate);
-        datums[5] = text_datum(self.o_orderpriority);
-        datums[6] = text_datum(self.o_clerk);
+        datums[2] = crate::encoding::text_datum_str(self.o_orderstatus.as_str());
+        datums[3] = crate::encoding::decimal_numeric_datum(self.o_totalprice);
+        datums[4] = crate::encoding::date_datum(self.o_orderdate);
+        datums[5] = crate::encoding::text_datum_str(self.o_orderpriority);
+        datums[6] = crate::encoding::text_datum(self.o_clerk);
         datums[7] = self.o_shippriority.into_datum().unwrap();
-        datums[8] = text_datum(self.o_comment);
+        datums[8] = crate::encoding::text_datum_str(self.o_comment);
     }
 }
 
@@ -472,17 +487,17 @@ impl TpchTuple for LineItem<'_> {
         datums[1] = self.l_partkey.into_datum().unwrap();
         datums[2] = self.l_suppkey.into_datum().unwrap();
         datums[3] = self.l_linenumber.into_datum().unwrap();
-        datums[4] = numeric_datum(self.l_quantity);
-        datums[5] = decimal_datum(self.l_extendedprice);
-        datums[6] = decimal_datum(self.l_discount);
-        datums[7] = decimal_datum(self.l_tax);
-        datums[8] = text_datum(self.l_returnflag);
-        datums[9] = text_datum(self.l_linestatus);
-        datums[10] = date_datum(self.l_shipdate);
-        datums[11] = date_datum(self.l_commitdate);
-        datums[12] = date_datum(self.l_receiptdate);
-        datums[13] = text_datum(self.l_shipinstruct);
-        datums[14] = text_datum(self.l_shipmode);
-        datums[15] = text_datum(self.l_comment);
+        datums[4] = crate::encoding::integer_numeric_datum(self.l_quantity);
+        datums[5] = crate::encoding::decimal_numeric_datum(self.l_extendedprice);
+        datums[6] = crate::encoding::decimal_numeric_datum(self.l_discount);
+        datums[7] = crate::encoding::decimal_numeric_datum(self.l_tax);
+        datums[8] = crate::encoding::text_datum_str(self.l_returnflag);
+        datums[9] = crate::encoding::text_datum_str(self.l_linestatus);
+        datums[10] = crate::encoding::date_datum(self.l_shipdate);
+        datums[11] = crate::encoding::date_datum(self.l_commitdate);
+        datums[12] = crate::encoding::date_datum(self.l_receiptdate);
+        datums[13] = crate::encoding::text_datum_str(self.l_shipinstruct);
+        datums[14] = crate::encoding::text_datum_str(self.l_shipmode);
+        datums[15] = crate::encoding::text_datum_str(self.l_comment);
     }
 }
