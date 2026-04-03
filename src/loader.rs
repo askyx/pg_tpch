@@ -202,23 +202,7 @@ impl Loader {
     }
 
     fn open_rel_file(&mut self, blk_num: BlockNumber) {
-        let locator = (*self.relation).rd_locator;
-
-        let fname = unsafe {
-            pg_sys::GetRelationPath(
-                locator.dbOid,
-                locator.spcOid,
-                locator.relNumber,
-                pg_sys::INVALID_PROC_NUMBER as i32,
-                MAIN_FORKNUM,
-            )
-        };
-
-        let mut path = unsafe {
-            core::ffi::CStr::from_ptr(fname.str_.as_ptr())
-                .to_string_lossy()
-                .into_owned()
-        };
+        let mut path = unsafe { relation_path(self.relation.as_ptr()) };
 
         let segno = blk_num / RELSEG_SIZE;
         if segno > 0 {
@@ -304,7 +288,7 @@ impl Loader {
         assert_ne!(offset, pg_sys::InvalidOffsetNumber);
 
         let mut tid = (*tuple).t_self;
-        pg_sys::ItemPointerSet(
+        item_pointer_set(
             &mut tid as *mut pg_sys::ItemPointerData,
             self.current_blk_num() + self.current_page,
             offset,
@@ -330,13 +314,7 @@ impl Loader {
         if !self.wal_logged {
             let blk_num = self.current_blk_num();
             let page = self.get_target_page(0);
-            pg_sys::log_newpage(
-                &mut (*relation).rd_locator as *mut pg_sys::RelFileLocator,
-                MAIN_FORKNUM,
-                blk_num,
-                page,
-                true,
-            );
+            log_newpage_for_relation(relation, blk_num, page);
             self.wal_logged = true;
         }
 
@@ -374,10 +352,7 @@ impl Loader {
         self.total_blks += num_pages;
         self.close_rel_file();
 
-        if !(*relation).rd_smgr.is_null() {
-            (*(*relation).rd_smgr).smgr_cached_nblocks[MAIN_FORKNUM as usize] =
-                self.current_blk_num();
-        }
+        update_smgr_cached_nblocks(relation, self.current_blk_num());
         pg_sys::CacheInvalidateRelcache(relation);
 
         self.current_page = 0;
@@ -400,6 +375,124 @@ impl Loader {
         unsafe { self.buffer_pool.offset((blk_num * BLCKSZ) as isize) }
     }
 }
+
+#[cfg(any(feature = "pg16", feature = "pg17", feature = "pg18"))]
+unsafe fn relation_path(relation: pg_sys::Relation) -> String {
+    let locator = (*relation).rd_locator;
+    relation_path_from_parts(locator.dbOid, locator.spcOid, locator.relNumber)
+}
+
+#[cfg(any(feature = "pg13", feature = "pg14", feature = "pg15"))]
+unsafe fn relation_path(relation: pg_sys::Relation) -> String {
+    let node = (*relation).rd_node;
+    relation_path_from_parts(node.dbNode, node.spcNode, node.relNode)
+}
+
+#[cfg(any(feature = "pg13", feature = "pg14", feature = "pg15"))]
+unsafe fn relation_path_from_parts(
+    db_oid: pg_sys::Oid,
+    spc_oid: pg_sys::Oid,
+    rel_number: pg_sys::Oid,
+) -> String {
+    let path = pg_sys::GetRelationPath(
+        db_oid,
+        spc_oid,
+        rel_number,
+        invalid_backend_or_proc_number(),
+        MAIN_FORKNUM,
+    );
+    core::ffi::CStr::from_ptr(path)
+        .to_string_lossy()
+        .into_owned()
+}
+
+#[cfg(any(feature = "pg16", feature = "pg17"))]
+unsafe fn relation_path_from_parts(
+    db_oid: pg_sys::Oid,
+    spc_oid: pg_sys::Oid,
+    rel_number: pg_sys::RelFileNumber,
+) -> String {
+    let path = pg_sys::GetRelationPath(
+        db_oid,
+        spc_oid,
+        rel_number,
+        invalid_backend_or_proc_number(),
+        MAIN_FORKNUM,
+    );
+    core::ffi::CStr::from_ptr(path)
+        .to_string_lossy()
+        .into_owned()
+}
+
+#[cfg(feature = "pg18")]
+unsafe fn relation_path_from_parts(
+    db_oid: pg_sys::Oid,
+    spc_oid: pg_sys::Oid,
+    rel_number: pg_sys::RelFileNumber,
+) -> String {
+    let path = pg_sys::GetRelationPath(
+        db_oid,
+        spc_oid,
+        rel_number,
+        invalid_backend_or_proc_number(),
+        MAIN_FORKNUM,
+    );
+    core::ffi::CStr::from_ptr(path.str_.as_ptr())
+        .to_string_lossy()
+        .into_owned()
+}
+
+unsafe fn item_pointer_set(
+    pointer: *mut pg_sys::ItemPointerData,
+    block_number: BlockNumber,
+    offset: pg_sys::OffsetNumber,
+) {
+    (*pointer).ip_blkid.bi_hi = ((block_number >> 16) & 0xffff) as u16;
+    (*pointer).ip_blkid.bi_lo = (block_number & 0xffff) as u16;
+    (*pointer).ip_posid = offset;
+}
+
+#[cfg(any(feature = "pg13", feature = "pg14", feature = "pg15", feature = "pg16"))]
+const fn invalid_backend_or_proc_number() -> i32 {
+    pg_sys::InvalidBackendId as i32
+}
+
+#[cfg(any(feature = "pg17", feature = "pg18"))]
+const fn invalid_backend_or_proc_number() -> i32 {
+    pg_sys::INVALID_PROC_NUMBER as i32
+}
+
+#[cfg(any(feature = "pg16", feature = "pg17", feature = "pg18"))]
+unsafe fn log_newpage_for_relation(relation: pg_sys::Relation, blk_num: BlockNumber, page: Page) {
+    pg_sys::log_newpage(
+        &mut (*relation).rd_locator as *mut pg_sys::RelFileLocator,
+        MAIN_FORKNUM,
+        blk_num,
+        page,
+        true,
+    );
+}
+
+#[cfg(any(feature = "pg13", feature = "pg14", feature = "pg15"))]
+unsafe fn log_newpage_for_relation(relation: pg_sys::Relation, blk_num: BlockNumber, page: Page) {
+    pg_sys::log_newpage(
+        &mut (*relation).rd_node as *mut pg_sys::RelFileNode,
+        MAIN_FORKNUM,
+        blk_num,
+        page,
+        true,
+    );
+}
+
+#[cfg(any(feature = "pg14", feature = "pg15", feature = "pg16", feature = "pg17", feature = "pg18"))]
+unsafe fn update_smgr_cached_nblocks(relation: pg_sys::Relation, block_number: BlockNumber) {
+    if !(*relation).rd_smgr.is_null() {
+        (*(*relation).rd_smgr).smgr_cached_nblocks[MAIN_FORKNUM as usize] = block_number;
+    }
+}
+
+#[cfg(feature = "pg13")]
+unsafe fn update_smgr_cached_nblocks(_relation: pg_sys::Relation, _block_number: BlockNumber) {}
 
 impl TpchTuple for Nation<'_> {
     fn write_datums(&self, datums: &mut [pg_sys::Datum]) {
