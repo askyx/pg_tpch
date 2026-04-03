@@ -1,102 +1,92 @@
 # pg_tpch
 
-`pg_tpch` is a PostgreSQL extension built with `pgrx` for fast in-database TPC-H data loading.
+`pg_tpch` is a PostgreSQL extension built with `pgrx` for fast, in-database TPC-H data loading. It is inspired by [DuckDB](https://github.com/duckdb/duckdb.git) and [Hyrise](https://github.com/hyrise/hyrise.git), with the goal of making TPC-H setup inside PostgreSQL much simpler and more practical.
 
-The project is intentionally focused on the TPC-H workflow rather than generic ETL. It creates standard TPC-H tables, loads data directly inside PostgreSQL, and provides a convenient bulk entry point that can use `dblink` for parallel per-table loading when available.
+The older [C++-based](https://github.com/askyx/pg_tpch/tree/base_on_cpp) implementation has been retired. The current version is built on top of [tpchgen-rs](https://github.com/clflushopt/tpchgen-rs) and [pgrx](https://github.com/pgcentralfoundation/pgrx). Many thanks to both projects.
 
-## What This Project Does
+## Good Fit For
 
-`pg_tpch` provides three main capabilities:
+- Fast TPC-H dataset preparation inside PostgreSQL. See [performance notes](./performce.md).
+- Benchmarking and performance experiments.
+- Repeated local schema resets and reloads.
+- Targeted optimization work on the TPC-H load path.
 
-- Create standard TPC-H tables in the current schema.
-- Load TPC-H data directly into PostgreSQL without going through an external file import workflow.
-- Optionally build secondary indexes after loading.
+This project is intentionally specialized. It prioritizes speed and control for TPC-H workflows over generic multi-schema data management features.
 
-It also includes helper functions to truncate all TPC-H data or drop all TPC-H tables from the current schema.
+## Version Support
 
-## Highlights
-
-- Built as a native PostgreSQL extension with `pgrx`.
-- Uses `tpchgen` to generate TPC-H data.
-- Avoids part of PostgreSQL's generic text/numeric/date input overhead by encoding TPC-H values more directly.
-- Stores table and index definitions in `tpch.tpch_table_metadata`.
-- Uses `dblink` automatically for parallel table loading when `dblink` is installed.
-- Falls back to serial loading when `dblink` is not installed.
-- Keeps table creation, data loading, index creation, truncation, and drop operations as separate steps.
-
-## Metadata Table
-
-When the extension is installed, it creates the following metadata table:
-
-```sql
-tpch.tpch_table_metadata (
-    table_name    varchar primary key,
-    table_def     text not null,
-    table_indexes varchar[] not null
-)
-```
-
-This table defines:
-
-- The `CREATE TABLE` statement for each standard TPC-H table.
-- The optional secondary index statements for each table.
-
-The following functions use this metadata:
-
-- `create_tpch_tables()`
-- `create_tpch_indexes()`
-- `cleanup_tpch_data()`
-- `drop_tpch_tables()`
-- `tpch_dbgen()`
-
-The extension also ships a query metadata table:
-
-```sql
-tpch.tpch_query_metadata (
-    qid   integer primary key,
-    query text not null
-)
-```
-
-It stores the 22 built-in TPC-H benchmark query texts.
-These are concrete query texts with parameter values already substituted, not `:1`, `:2` style templates.
-
-If you want to customize table definitions or secondary indexes, update `tpch.tpch_table_metadata` directly.
+- Minimum supported PostgreSQL version: `13`
+- Tested PostgreSQL versions: `13`, `14`, `15`, `16`, `17`, `18`
 
 ## Installation
 
-### 1. Build and install the extension
+Prebuilt release archives are currently provided for:
+
+- Ubuntu 22.04
+- x86_64
+- PostgreSQL 13 through 18
+
+Each archive targets exactly one PostgreSQL major version, for example:
+
+- `pg_tpch-pg13-ubuntu22.04-x86_64.tar.gz`
+- `pg_tpch-pg18-ubuntu22.04-x86_64.tar.gz`
+
+Make sure the archive matches your PostgreSQL major version exactly. If your environment is not covered by the prebuilt packages, you can build the extension yourself or open an issue requesting support.
+
+### 1. Find your PostgreSQL extension directories
 
 ```bash
-cargo pgrx install
+pg_config --pkglibdir
+pg_config --sharedir
 ```
 
-### 2. Install the extension in PostgreSQL
+### 2. Extract the archive
+
+```bash
+tar -xzf pg_tpch-pg16-ubuntu22.04-x86_64.tar.gz
+cd pg_tpch-pg16-ubuntu22.04-x86_64
+```
+
+### 3. Copy the extension files into PostgreSQL
+
+```bash
+cp lib/pg_tpch.so "$(pg_config --pkglibdir)/"
+cp share/extension/pg_tpch.control "$(pg_config --sharedir)/extension/"
+cp share/extension/pg_tpch--0.1.0.sql "$(pg_config --sharedir)/extension/"
+```
+
+### 4. Install the extension in PostgreSQL
 
 ```sql
 CREATE EXTENSION pg_tpch;
 ```
 
-### 3. Optional: install `dblink` for parallel `tpch_dbgen()`
+### 5. Optional: install `dblink` for parallel `tpch_dbgen()`
+
+`tpch_dbgen()` can use `dblink` to load tables in parallel. This is optional. The extension works normally even if `dblink` is not installed.
 
 ```sql
 CREATE EXTENSION dblink;
 ```
 
-## How Schema Selection Works
-
-The extension does not take a schema name argument for table management or bulk loading.
-
-Instead, it always operates on the current schema selected by `search_path`.
-
-Example:
+## Basic Usage
 
 ```sql
-CREATE SCHEMA my_tpch;
-SET search_path = my_tpch, public;
+-- create tables with secondary indexes
+-- pass false to skip index creation
+SELECT * FROM create_tpch_tables(true);
 
-SELECT create_tpch_tables(false);
-SELECT * FROM tpch_dbgen(0.01);
+-- load data at scale factor 1
+SELECT * FROM tpch_dbgen(1);
+
+-- fetch query 1 into a psql variable
+SELECT query AS q1 FROM tpch_queries(1) \gset
+
+-- execute the query
+:q1
+
+-- remove all data and prepare for another scale factor
+SELECT * FROM cleanup_tpch_data();
 ```
 
 ## Function Reference
@@ -113,7 +103,7 @@ SELECT * FROM tpch_dbgen(0.01);
 
 ### Single-Table Loader Functions
 
-Each loader inserts data into one already-existing table and returns a single-row summary.
+Each loader inserts data into one existing table and returns a single-row summary.
 
 | Function | Target Table | Returns | Example |
 | --- | --- | --- | --- |
@@ -132,106 +122,9 @@ Each loader inserts data into one already-existing table and returns a single-ro
 | --- | --- | --- | --- |
 | `tpch_dbgen(scale_factor double precision default 1.0)` | Loads all 8 TPC-H tables in the current schema. Uses `dblink` for parallel per-table loading if available, otherwise loads serially. | `table(table_name text, rows bigint, heap_time_ms numeric(20,2), reindex_time_ms numeric(20,2))` | `SELECT * FROM tpch_dbgen(0.01);` |
 
-## Function Notes
-
-### `create_tpch_tables()`
-
-- Creates the standard TPC-H tables in the current schema.
-- Reads `table_def` from `tpch.tpch_table_metadata`.
-- If `create_indexes = true`, also executes `table_indexes`.
-- Fails if same-name TPC-H tables already exist in the current schema.
-
-### `create_tpch_indexes()`
-
-- Creates only secondary indexes.
-- Does not create tables.
-- Reads index definitions from `tpch.tpch_table_metadata`.
-
-### `cleanup_tpch_data()`
-
-- Runs `TRUNCATE` across all TPC-H tables in the current schema.
-- Keeps table definitions and indexes in place.
-- Fails if the required TPC-H tables do not exist.
-
-### `drop_tpch_tables()`
-
-- Drops the standard TPC-H tables from the current schema.
-- Intended to fully clean a TPC-H working schema.
-
-### `generate_*()`
-
-- Each function loads exactly one table.
-- The target table must already exist in the current schema.
-- The returned `heap_time_ms` and `reindex_time_ms` values are raw timing numbers from that table load.
-
-### `tpch_queries()`
-
-- Returns query text metadata, not execution results.
-- When called without a parameter, returns all 22 TPC-H queries ordered by `qid`.
-- When called with a `qid`, returns the matching query if it exists.
-- Uses the built-in `tpch.tpch_query_metadata` table.
-- Returns executable SQL with parameter values already substituted.
-
-### `tpch_dbgen()`
-
-- Loads all 8 TPC-H tables.
-- Requires that the TPC-H tables already exist in the current schema.
-- Does not create tables.
-- Does not create secondary indexes.
-- Returns one row per table.
-- `heap_time_ms` and `reindex_time_ms` are returned as `numeric(20,2)`, so they display with two decimals and are right-aligned in `psql`.
-
-## Typical Workflows
-
-### Fastest common workflow
-
-Create tables first, load data, then build indexes:
-
-```sql
-CREATE EXTENSION pg_tpch;
-CREATE EXTENSION dblink;
-
-CREATE SCHEMA my_tpch;
-SET search_path = my_tpch, public;
-
-SELECT create_tpch_tables(false);
-SELECT * FROM tpch_dbgen(0.01);
-SELECT create_tpch_indexes();
-```
-
-### Minimal workflow
-
-If you only want tables and data:
-
-```sql
-CREATE SCHEMA my_tpch;
-SET search_path = my_tpch, public;
-
-SELECT create_tpch_tables(false);
-SELECT * FROM tpch_dbgen(0.01);
-```
-
-### Reload data without dropping tables
-
-```sql
-SET search_path = my_tpch, public;
-
-SELECT cleanup_tpch_data();
-SELECT * FROM tpch_dbgen(0.01);
-```
-
-### Load one table only
-
-```sql
-SET search_path = my_tpch, public;
-
-SELECT create_tpch_tables(false);
-SELECT * FROM generate_lineitem(1.0);
-```
-
 ## Customizing Table and Index Definitions
 
-Because table definitions live in `tpch.tpch_table_metadata`, you can inspect or modify them with SQL.
+Table and secondary index definitions are stored in `tpch.tpch_table_metadata`, so you can inspect or modify them directly with SQL.
 
 ### Inspect the current metadata
 
@@ -261,45 +154,10 @@ WHERE table_name = 'orders';
 
 ### Notes
 
-- `table_def` must contain a full `CREATE TABLE ...` statement.
-- Each element in `table_indexes` must contain a full `CREATE INDEX ...` statement.
-- Changes to metadata affect future table creation and index creation.
+- `table_def` must contain a complete `CREATE TABLE ...` statement.
+- Each element in `table_indexes` must contain a complete `CREATE INDEX ...` statement.
+- Metadata changes affect future table creation and index creation.
 
-## Standard TPC-H Tables Included
+## License
 
-The extension ships metadata for these 8 TPC-H tables:
-
-- `region`
-- `nation`
-- `supplier`
-- `customer`
-- `part`
-- `partsupp`
-- `orders`
-- `lineitem`
-
-## Testing
-
-The project includes regression coverage for:
-
-- value encoding
-- table creation and cleanup
-- single-table loading
-- serial `tpch_dbgen()`
-- `dblink`-based `tpch_dbgen()`
-
-Run:
-
-```bash
-cargo check
-cargo pgrx test
-```
-
-## Good Fit For
-
-- fast TPC-H dataset preparation inside PostgreSQL
-- benchmarking and performance experiments
-- repeated local schema resets and reloads
-- targeted optimization work on the TPC-H load path
-
-This project is intentionally specialized. It prioritizes controllability and speed for TPC-H over generic multi-schema data management features.
+This project is licensed under the MIT License. See [LICENSE](./LICENSE).

@@ -3,6 +3,13 @@ name = "pg_tpch"
 version = "0.1.0"
 authors = ["askyx"]
 edition = "2021"
+description = "A pgrx-based PostgreSQL extension for fast in-database TPC-H table creation, data loading, and query metadata."
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/askyx/pg_tpchrs"
+homepage = "https://github.com/askyx/pg_tpchrs"
+keywords = ["postgres", "postgresql", "tpch", "pgrx", "benchmark"]
+categories = ["database"]
 
 [lib]
 crate-type = ["cdylib", "lib"]
