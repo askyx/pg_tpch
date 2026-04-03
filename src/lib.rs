@@ -6,6 +6,7 @@ use pgrx::{prelude::*, spi, Spi};
 mod encoding;
 mod loader;
 mod schema;
+mod tpch_queries;
 mod utils;
 
 extension_sql!(
@@ -16,6 +17,11 @@ extension_sql!(
         table_name varchar PRIMARY KEY,
         table_def text NOT NULL,
         table_indexes varchar[] NOT NULL DEFAULT ARRAY[]::varchar[]
+    );
+
+    CREATE TABLE tpch.tpch_query_metadata (
+        qid integer PRIMARY KEY,
+        query text NOT NULL
     );
 
     INSERT INTO tpch.tpch_table_metadata (table_name, table_def, table_indexes)
@@ -213,7 +219,7 @@ define_tpch_loader!(
     tpchgen::generators::LineItemGenerator
 );
 
-const XDBGEN_TASKS: &[(&str, &str)] = &[
+const TPCH_DBGEN_TASKS: &[(&str, &str)] = &[
     ("region", "generate_region"),
     ("nation", "generate_nation"),
     ("part", "generate_part"),
@@ -225,7 +231,7 @@ const XDBGEN_TASKS: &[(&str, &str)] = &[
 ];
 
 #[derive(Clone, Debug)]
-struct XdbgenStat {
+struct TpchDbgenStat {
     table_name: String,
     rows: i64,
     heap_time_ms: f64,
@@ -253,7 +259,14 @@ fn cleanup_tpch_data() -> String {
 }
 
 #[pg_extern]
-fn xdbgen(
+fn tpch_queries(
+    qid: default!(Option<i32>, "NULL"),
+) -> TableIterator<'static, (name!(qid, i32), name!(query, String))> {
+    TableIterator::new(schema::tpch_queries(qid).into_iter())
+}
+
+#[pg_extern]
+fn tpch_dbgen(
     scale_factor: default!(f64, 1.0),
 ) -> TableIterator<
     'static,
@@ -269,7 +282,7 @@ fn xdbgen(
 
     if let Some(dblink_schema) = extension_schema("dblink") {
         TableIterator::new(
-            xdbgen_parallel(scale_factor, &target_schema, &dblink_schema)
+            tpch_dbgen_parallel(scale_factor, &target_schema, &dblink_schema)
                 .into_iter()
                 .map(stat_to_row),
         )
@@ -283,12 +296,12 @@ fn xdbgen(
 }
 
 #[pg_extern]
-fn hello_pg_tpchrs() -> &'static str {
-    "Hello, pg_tpchrs"
+fn hello_pg_tpch() -> &'static str {
+    "Hello, pg_tpch"
 }
 
 fn stat_to_row(
-    stat: XdbgenStat,
+    stat: TpchDbgenStat,
 ) -> (
     name!(table_name, String),
     name!(rows, i64),
@@ -303,7 +316,7 @@ fn stat_to_row(
     )
 }
 
-fn load_all_tables_serial(scale_factor: f64, schema_name: &str) -> Vec<XdbgenStat> {
+fn load_all_tables_serial(scale_factor: f64, schema_name: &str) -> Vec<TpchDbgenStat> {
     Spi::run(&format!(
         "SET LOCAL search_path = {}, pg_catalog",
         spi::quote_identifier(schema_name)
@@ -322,7 +335,11 @@ fn load_all_tables_serial(scale_factor: f64, schema_name: &str) -> Vec<XdbgenSta
     ]
 }
 
-fn xdbgen_parallel(scale_factor: f64, schema_name: &str, dblink_schema: &str) -> Vec<XdbgenStat> {
+fn tpch_dbgen_parallel(
+    scale_factor: f64,
+    schema_name: &str,
+    dblink_schema: &str,
+) -> Vec<TpchDbgenStat> {
     let dblink_connect = spi::quote_qualified_identifier(dblink_schema, "dblink_connect");
     let dblink_disconnect = spi::quote_qualified_identifier(dblink_schema, "dblink_disconnect");
     let dblink_exec = spi::quote_qualified_identifier(dblink_schema, "dblink_exec");
@@ -332,9 +349,9 @@ fn xdbgen_parallel(scale_factor: f64, schema_name: &str, dblink_schema: &str) ->
     let function_schema = extension_schema_for_function("generate_region");
     let conninfo_literal = spi::quote_literal(local_conninfo_string());
 
-    let mut pending_connections = Vec::with_capacity(XDBGEN_TASKS.len());
-    for (table_name, function_name) in XDBGEN_TASKS {
-        let conn_name = format!("pg_tpchrs_xdbgen_{table_name}");
+    let mut pending_connections = Vec::with_capacity(TPCH_DBGEN_TASKS.len());
+    for (table_name, function_name) in TPCH_DBGEN_TASKS {
+        let conn_name = format!("pg_tpch_tpch_dbgen_{table_name}");
         dblink_connect_named(&dblink_connect, &conn_name, &conninfo_literal);
         dblink_exec_named(
             &dblink_exec,
@@ -358,7 +375,7 @@ fn xdbgen_parallel(scale_factor: f64, schema_name: &str, dblink_schema: &str) ->
         pending_connections.push(conn_name);
     }
 
-    let mut stats = Vec::with_capacity(XDBGEN_TASKS.len());
+    let mut stats = Vec::with_capacity(TPCH_DBGEN_TASKS.len());
 
     while !pending_connections.is_empty() {
         let mut next_round = Vec::with_capacity(pending_connections.len());
@@ -375,7 +392,7 @@ fn xdbgen_parallel(scale_factor: f64, schema_name: &str, dblink_schema: &str) ->
 
             let (table_name, rows, heap_time_ms, reindex_time_ms) =
                 consume_remote_result(&dblink_get_result, &conn_name);
-            stats.push(XdbgenStat {
+            stats.push(TpchDbgenStat {
                 table_name,
                 rows,
                 heap_time_ms,
@@ -404,10 +421,10 @@ fn collect_loader_stat(
             name!(reindex_time_ms, f64),
         ),
     >,
-) -> XdbgenStat {
+) -> TpchDbgenStat {
     let stats: Vec<_> = result.collect();
     let (rows, heap_time_ms, reindex_time_ms) = stats[0];
-    XdbgenStat {
+    TpchDbgenStat {
         table_name: table_name.to_string(),
         rows,
         heap_time_ms,
@@ -424,7 +441,7 @@ fn consume_remote_result(dblink_get_result: &str, conn_name: &str) -> (String, i
 
     (
         conn_name
-            .trim_start_matches("pg_tpchrs_xdbgen_")
+            .trim_start_matches("pg_tpch_tpch_dbgen_")
             .to_string(),
         rows.unwrap_or_default(),
         heap_time_ms.unwrap_or_default(),
@@ -517,8 +534,8 @@ mod tests {
     use tpchgen::{dates::TPCHDate, decimal::TPCHDecimal};
 
     #[pg_test]
-    fn test_hello_pg_tpchrs() {
-        assert_eq!("Hello, pg_tpchrs", crate::hello_pg_tpchrs());
+    fn test_hello_pg_tpch() {
+        assert_eq!("Hello, pg_tpch", crate::hello_pg_tpch());
     }
 
     fn schema_literal(schema_name: &str) -> String {
@@ -686,7 +703,7 @@ mod tests {
         let schema_name = "tpch_cleanup_data";
         use_test_schema(schema_name);
         let _ = crate::create_tpch_tables(false);
-        let _: Vec<_> = crate::xdbgen(0.01).collect();
+        let _: Vec<_> = crate::tpch_dbgen(0.01).collect();
 
         let result = crate::cleanup_tpch_data();
 
@@ -697,16 +714,16 @@ mod tests {
     }
 
     #[pg_test]
-    fn test_xdbgen_serial_loads_data() {
+    fn test_tpch_dbgen_serial_loads_data() {
         Spi::run("DROP EXTENSION IF EXISTS dblink").unwrap();
 
-        let schema_name = "tpch_xdbgen_serial";
+        let schema_name = "tpch_dbgen_serial";
         use_test_schema(schema_name);
         let _ = crate::create_tpch_tables(false);
         let scale_factor = 0.01;
         let expected_lineitems = LineItemGenerator::new(scale_factor, 1, 1).iter().count() as i64;
 
-        let result: Vec<_> = crate::xdbgen(scale_factor).collect();
+        let result: Vec<_> = crate::tpch_dbgen(scale_factor).collect();
 
         assert_eq!(8, result.len());
         assert!(result.iter().all(|row| parse_time_ms(&row.2) >= 0.0));
@@ -720,21 +737,21 @@ mod tests {
     }
 
     #[pg_test]
-    fn test_xdbgen_uses_dblink_when_available() {
+    fn test_tpch_dbgen_uses_dblink_when_available() {
         if !dblink_available() {
             return;
         }
 
         Spi::run("CREATE EXTENSION IF NOT EXISTS dblink").unwrap();
 
-        let schema_name = unique_schema_name("tpch_xdbgen_dblink");
+        let schema_name = unique_schema_name("tpch_dbgen_dblink");
         let dblink_schema = crate::extension_schema("dblink").unwrap();
         let dblink_connect =
             spi::quote_qualified_identifier(dblink_schema.as_str(), "dblink_connect");
         let dblink_disconnect =
             spi::quote_qualified_identifier(dblink_schema.as_str(), "dblink_disconnect");
         let dblink_exec = spi::quote_qualified_identifier(dblink_schema.as_str(), "dblink_exec");
-        let conn_name = "pg_tpchrs_test_setup";
+        let conn_name = "pg_tpch_test_setup";
         let conninfo_literal = spi::quote_literal(crate::local_conninfo_string());
         crate::dblink_connect_named(&dblink_connect, conn_name, &conninfo_literal);
         crate::dblink_exec_named(
@@ -764,7 +781,7 @@ mod tests {
         let scale_factor = 0.01;
         let expected_orders = OrderGenerator::new(scale_factor, 1, 1).iter().count() as i64;
 
-        let result: Vec<_> = crate::xdbgen(scale_factor).collect();
+        let result: Vec<_> = crate::tpch_dbgen(scale_factor).collect();
 
         assert_eq!(8, result.len());
         assert!(result.iter().all(|row| parse_time_ms(&row.2) >= 0.0));
@@ -777,15 +794,18 @@ mod tests {
     }
 
     #[pg_test]
-    fn test_xdbgen_fails_when_tables_are_missing() {
-        let schema_name = "tpch_xdbgen_missing";
+    fn test_tpch_dbgen_fails_when_tables_are_missing() {
+        let schema_name = "tpch_dbgen_missing";
         use_test_schema(schema_name);
 
         let panic = std::panic::catch_unwind(|| {
-            let _: Vec<_> = crate::xdbgen(0.01).collect();
+            let _: Vec<_> = crate::tpch_dbgen(0.01).collect();
         });
 
-        assert!(panic.is_err(), "xdbgen should fail when tables are missing");
+        assert!(
+            panic.is_err(),
+            "tpch_dbgen should fail when tables are missing"
+        );
     }
 
     #[pg_test]
@@ -809,6 +829,26 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(100, supplier_count);
+    }
+
+    #[pg_test]
+    fn test_tpch_queries_returns_all_queries() {
+        let result: Vec<_> = crate::tpch_queries(None).collect();
+
+        assert_eq!(22, result.len());
+        assert_eq!(1, result.first().unwrap().0);
+        assert_eq!(22, result.last().unwrap().0);
+        assert!(result.iter().all(|(_, query)| !query.trim().is_empty()));
+    }
+
+    #[pg_test]
+    fn test_tpch_queries_returns_specific_query() {
+        let result: Vec<_> = crate::tpch_queries(Some(15)).collect();
+
+        assert_eq!(1, result.len());
+        assert_eq!(15, result[0].0);
+        assert!(result[0].1.contains("WITH revenue AS"));
+        assert!(result[0].1.contains("1996-01-01"));
     }
 
     #[pg_test]

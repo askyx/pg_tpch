@@ -1,5 +1,5 @@
 [package]
-name = "pg_tpchrs"
+name = "pg_tpch"
 version = "0.1.0"
 authors = ["askyx"]
 edition = "2021"
@@ -8,7 +8,7 @@ edition = "2021"
 crate-type = ["cdylib", "lib"]
 
 [[bin]]
-name = "pgrx_embed_pg_tpchrs"
+name = "pgrx_embed_pg_tpch"
 path = "./src/bin/pgrx_embed.rs"
 
 [features]

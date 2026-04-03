@@ -1,6 +1,6 @@
-comment = 'pg_tpchrs:  Created by pgrx'
+comment = 'pg_tpch:  Created by pgrx'
 default_version = '@CARGO_VERSION@'
-module_pathname = 'pg_tpchrs'
+module_pathname = 'pg_tpch'
 relocatable = false
 superuser = true
 trusted = false

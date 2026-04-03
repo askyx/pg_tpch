@@ -2,6 +2,7 @@ use pgrx::{prelude::*, spi};
 
 const METADATA_SCHEMA_NAME: &str = "tpch";
 const METADATA_TABLE_NAME: &str = "tpch_table_metadata";
+const QUERY_TABLE_NAME: &str = "tpch_query_metadata";
 
 pub(crate) fn create_tpch_tables(create_indexes: bool) -> String {
     let schema_name = current_target_schema_name();
@@ -65,6 +66,39 @@ pub(crate) fn cleanup_tpch_data() -> String {
     Spi::run(&format!("TRUNCATE TABLE {}", qualified_tables.join(", "))).unwrap();
 
     format!("Truncated TPC-H data in schema {:?}", schema_name)
+}
+
+pub(crate) fn tpch_queries(qid: Option<i32>) -> Vec<(i32, String)> {
+    ensure_tpch_query_metadata_seeded();
+
+    let query_table = query_table_qname();
+    let sql = match qid {
+        Some(qid) => format!(
+            "SELECT qid, query::text
+             FROM {query_table}
+             WHERE qid = {}
+             ORDER BY qid",
+            qid
+        ),
+        None => format!(
+            "SELECT qid, query::text
+             FROM {query_table}
+             ORDER BY qid"
+        ),
+    };
+
+    Spi::connect(|client| {
+        client
+            .select(&sql, None, &[])
+            .unwrap()
+            .map(|row| {
+                (
+                    row["qid"].value::<i32>().unwrap().unwrap(),
+                    row["query"].value::<String>().unwrap().unwrap(),
+                )
+            })
+            .collect()
+    })
 }
 
 #[cfg(any(test, feature = "pg_test"))]
@@ -182,4 +216,32 @@ fn metadata_array_query(column_name: &str, order_by: &str) -> Vec<String> {
 
 fn metadata_table_qname() -> String {
     spi::quote_qualified_identifier(METADATA_SCHEMA_NAME, METADATA_TABLE_NAME)
+}
+
+fn query_table_qname() -> String {
+    spi::quote_qualified_identifier(METADATA_SCHEMA_NAME, QUERY_TABLE_NAME)
+}
+
+fn ensure_tpch_query_metadata_seeded() {
+    let query_table = query_table_qname();
+    let seeded = Spi::get_one::<bool>(&format!(
+        "SELECT EXISTS (SELECT 1 FROM {query_table} LIMIT 1)"
+    ))
+    .unwrap()
+    .unwrap_or(false);
+
+    if seeded {
+        return;
+    }
+
+    for (qid, query) in crate::tpch_queries::TPCH_QUERY_TEXTS {
+        Spi::run(&format!(
+            "INSERT INTO {query_table} (qid, query)
+             VALUES ({}, {})
+             ON CONFLICT (qid) DO UPDATE SET query = EXCLUDED.query",
+            qid,
+            spi::quote_literal(query)
+        ))
+        .unwrap();
+    }
 }

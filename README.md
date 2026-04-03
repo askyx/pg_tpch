@@ -1,12 +1,12 @@
-# pg_tpchrs
+# pg_tpch
 
-`pg_tpchrs` is a PostgreSQL extension built with `pgrx` for fast in-database TPC-H data loading.
+`pg_tpch` is a PostgreSQL extension built with `pgrx` for fast in-database TPC-H data loading.
 
 The project is intentionally focused on the TPC-H workflow rather than generic ETL. It creates standard TPC-H tables, loads data directly inside PostgreSQL, and provides a convenient bulk entry point that can use `dblink` for parallel per-table loading when available.
 
 ## What This Project Does
 
-`pg_tpchrs` provides three main capabilities:
+`pg_tpch` provides three main capabilities:
 
 - Create standard TPC-H tables in the current schema.
 - Load TPC-H data directly into PostgreSQL without going through an external file import workflow.
@@ -47,7 +47,19 @@ The following functions use this metadata:
 - `create_tpch_indexes()`
 - `cleanup_tpch_data()`
 - `drop_tpch_tables()`
-- `xdbgen()`
+- `tpch_dbgen()`
+
+The extension also ships a query metadata table:
+
+```sql
+tpch.tpch_query_metadata (
+    qid   integer primary key,
+    query text not null
+)
+```
+
+It stores the 22 built-in TPC-H benchmark query texts.
+These are concrete query texts with parameter values already substituted, not `:1`, `:2` style templates.
 
 If you want to customize table definitions or secondary indexes, update `tpch.tpch_table_metadata` directly.
 
@@ -62,10 +74,10 @@ cargo pgrx install
 ### 2. Install the extension in PostgreSQL
 
 ```sql
-CREATE EXTENSION pg_tpchrs;
+CREATE EXTENSION pg_tpch;
 ```
 
-### 3. Optional: install `dblink` for parallel `xdbgen()`
+### 3. Optional: install `dblink` for parallel `tpch_dbgen()`
 
 ```sql
 CREATE EXTENSION dblink;
@@ -84,7 +96,7 @@ CREATE SCHEMA my_tpch;
 SET search_path = my_tpch, public;
 
 SELECT create_tpch_tables(false);
-SELECT * FROM xdbgen(0.01);
+SELECT * FROM tpch_dbgen(0.01);
 ```
 
 ## Function Reference
@@ -97,6 +109,7 @@ SELECT * FROM xdbgen(0.01);
 | `create_tpch_indexes()` | Creates secondary indexes for the current schema using `tpch.tpch_table_metadata`. | `text` status message | `SELECT create_tpch_indexes();` |
 | `cleanup_tpch_data()` | Truncates all TPC-H tables in the current schema without dropping table definitions or indexes. | `text` status message | `SELECT cleanup_tpch_data();` |
 | `drop_tpch_tables()` | Drops all 8 TPC-H tables from the current schema. | `text` status message | `SELECT drop_tpch_tables();` |
+| `tpch_queries(qid integer default null)` | Returns the built-in concrete TPC-H query texts from `tpch.tpch_query_metadata`. Returns all queries when `qid` is null, or one query when `qid` is specified. | `table(qid integer, query text)` | `SELECT * FROM tpch_queries();` |
 
 ### Single-Table Loader Functions
 
@@ -117,7 +130,7 @@ Each loader inserts data into one already-existing table and returns a single-ro
 
 | Function | Purpose | Returns | Example |
 | --- | --- | --- | --- |
-| `xdbgen(scale_factor double precision default 1.0)` | Loads all 8 TPC-H tables in the current schema. Uses `dblink` for parallel per-table loading if available, otherwise loads serially. | `table(table_name text, rows bigint, heap_time_ms numeric(20,2), reindex_time_ms numeric(20,2))` | `SELECT * FROM xdbgen(0.01);` |
+| `tpch_dbgen(scale_factor double precision default 1.0)` | Loads all 8 TPC-H tables in the current schema. Uses `dblink` for parallel per-table loading if available, otherwise loads serially. | `table(table_name text, rows bigint, heap_time_ms numeric(20,2), reindex_time_ms numeric(20,2))` | `SELECT * FROM tpch_dbgen(0.01);` |
 
 ## Function Notes
 
@@ -151,7 +164,15 @@ Each loader inserts data into one already-existing table and returns a single-ro
 - The target table must already exist in the current schema.
 - The returned `heap_time_ms` and `reindex_time_ms` values are raw timing numbers from that table load.
 
-### `xdbgen()`
+### `tpch_queries()`
+
+- Returns query text metadata, not execution results.
+- When called without a parameter, returns all 22 TPC-H queries ordered by `qid`.
+- When called with a `qid`, returns the matching query if it exists.
+- Uses the built-in `tpch.tpch_query_metadata` table.
+- Returns executable SQL with parameter values already substituted.
+
+### `tpch_dbgen()`
 
 - Loads all 8 TPC-H tables.
 - Requires that the TPC-H tables already exist in the current schema.
@@ -167,14 +188,14 @@ Each loader inserts data into one already-existing table and returns a single-ro
 Create tables first, load data, then build indexes:
 
 ```sql
-CREATE EXTENSION pg_tpchrs;
+CREATE EXTENSION pg_tpch;
 CREATE EXTENSION dblink;
 
 CREATE SCHEMA my_tpch;
 SET search_path = my_tpch, public;
 
 SELECT create_tpch_tables(false);
-SELECT * FROM xdbgen(0.01);
+SELECT * FROM tpch_dbgen(0.01);
 SELECT create_tpch_indexes();
 ```
 
@@ -187,7 +208,7 @@ CREATE SCHEMA my_tpch;
 SET search_path = my_tpch, public;
 
 SELECT create_tpch_tables(false);
-SELECT * FROM xdbgen(0.01);
+SELECT * FROM tpch_dbgen(0.01);
 ```
 
 ### Reload data without dropping tables
@@ -196,7 +217,7 @@ SELECT * FROM xdbgen(0.01);
 SET search_path = my_tpch, public;
 
 SELECT cleanup_tpch_data();
-SELECT * FROM xdbgen(0.01);
+SELECT * FROM tpch_dbgen(0.01);
 ```
 
 ### Load one table only
@@ -218,6 +239,14 @@ Because table definitions live in `tpch.tpch_table_metadata`, you can inspect or
 SELECT table_name, table_def, table_indexes
 FROM tpch.tpch_table_metadata
 ORDER BY table_name;
+```
+
+### Inspect the built-in TPC-H queries
+
+```sql
+SELECT qid, query
+FROM tpch.tpch_query_metadata
+ORDER BY qid;
 ```
 
 ### Modify an index definition
@@ -256,8 +285,8 @@ The project includes regression coverage for:
 - value encoding
 - table creation and cleanup
 - single-table loading
-- serial `xdbgen()`
-- `dblink`-based `xdbgen()`
+- serial `tpch_dbgen()`
+- `dblink`-based `tpch_dbgen()`
 
 Run:
 
