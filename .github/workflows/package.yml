@@ -72,7 +72,6 @@ jobs:
           ARCHIVE_NAME: pg_tpch-pg${{ matrix.pg_version }}-ubuntu22.04-x86_64
         run: |
           cargo pgrx package \
-            --release \
             --pg-config "${PG_CONFIG_PATH}" \
             --out-dir "${PACKAGE_DIR}"
           mkdir -p dist/artifacts
