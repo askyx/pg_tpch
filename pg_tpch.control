@@ -1,4 +1,4 @@
-comment = 'pg_tpch:  Created by pgrx'
+comment = 'built with `pgrx` for fast, in-database TPC-H data loading'
 default_version = '@CARGO_VERSION@'
 module_pathname = 'pg_tpch'
 relocatable = false
