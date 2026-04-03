@@ -62,29 +62,6 @@ define_tpch_loader!(
 );
 
 #[pg_extern]
-fn generate_lineitem_parallel(
-    scale_factor: default!(f64, 1.0),
-    workers: default!(i32, 0),
-) -> TableIterator<
-    'static,
-    (
-        name!(rows, i64),
-        name!(heap_time_ms, f64),
-        name!(reindex_time_ms, f64),
-    ),
-> {
-    let worker_count = if workers <= 0 {
-        std::thread::available_parallelism()
-            .map(|value| value.get().saturating_sub(1).max(1))
-            .unwrap_or(1)
-    } else {
-        workers as usize
-    };
-    let result = loader::load_lineitem_parallel(scale_factor, worker_count);
-    TableIterator::once((result.rows, result.heap_time_ms, result.reindex_time_ms))
-}
-
-#[pg_extern]
 fn hello_pg_tpchrs() -> &'static str {
     "Hello, pg_tpchrs"
 }
@@ -512,61 +489,6 @@ mod tests {
         .unwrap();
 
         let result: Vec<_> = crate::generate_lineitem(scale_factor).collect();
-        assert_eq!(expected_rows, result[0].0);
-
-        let count = Spi::get_one::<i64>("SELECT count(*) FROM lineitem")
-            .unwrap()
-            .unwrap();
-        assert_eq!(expected_rows, count);
-
-        let first = Spi::get_three::<String, String, String>(
-            "SELECT l_quantity::text, l_extendedprice::text, l_shipdate::text
-             FROM lineitem
-             WHERE l_orderkey = 1 AND l_linenumber = 1",
-        )
-        .unwrap();
-        assert_eq!(
-            (
-                Some(expected_first_lineitem.l_quantity.to_string()),
-                Some(expected_first_lineitem.l_extendedprice.to_string()),
-                Some(expected_first_lineitem.l_shipdate.to_string())
-            ),
-            first
-        );
-    }
-
-    #[pg_test]
-    fn test_generate_lineitem_parallel_loads_numeric_and_date_columns() {
-        let scale_factor = 0.01;
-        let expected_rows = LineItemGenerator::new(scale_factor, 1, 1).iter().count() as i64;
-        let expected_first_lineitem = LineItemGenerator::new(scale_factor, 1, 1)
-            .iter()
-            .next()
-            .unwrap();
-
-        Spi::run(
-            "CREATE TABLE lineitem (
-                l_orderkey BIGINT NOT NULL,
-                l_partkey BIGINT NOT NULL,
-                l_suppkey BIGINT NOT NULL,
-                l_linenumber INTEGER NOT NULL,
-                l_quantity NUMERIC(15,2) NOT NULL,
-                l_extendedprice NUMERIC(15,2) NOT NULL,
-                l_discount NUMERIC(15,2) NOT NULL,
-                l_tax NUMERIC(15,2) NOT NULL,
-                l_returnflag TEXT NOT NULL,
-                l_linestatus TEXT NOT NULL,
-                l_shipdate DATE NOT NULL,
-                l_commitdate DATE NOT NULL,
-                l_receiptdate DATE NOT NULL,
-                l_shipinstruct TEXT NOT NULL,
-                l_shipmode TEXT NOT NULL,
-                l_comment TEXT NOT NULL
-            )",
-        )
-        .unwrap();
-
-        let result: Vec<_> = crate::generate_lineitem_parallel(scale_factor, 2).collect();
         assert_eq!(expected_rows, result[0].0);
 
         let count = Spi::get_one::<i64>("SELECT count(*) FROM lineitem")

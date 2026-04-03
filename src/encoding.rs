@@ -50,7 +50,9 @@ pub(crate) fn tpch_date_to_pg_date(value: TPCHDate) -> pg_sys::DateADT {
 #[allow(dead_code)]
 pub(crate) fn encode_text_bytes(value: &str) -> Vec<u8> {
     let mut bytes: Vec<u8> = Vec::with_capacity(VARHDRSZ + value.len());
-    append_text_bytes(&mut bytes, value);
+    bytes.resize(VARHDRSZ, 0);
+    bytes.extend_from_slice(value.as_bytes());
+    set_varlena_header(&mut bytes);
     bytes
 }
 
@@ -64,26 +66,6 @@ pub(crate) fn encode_text_display_bytes(value: impl fmt::Display) -> Vec<u8> {
     writer.bytes
 }
 
-pub(crate) fn append_text_bytes(dst: &mut Vec<u8>, value: &str) {
-    dst.extend_from_slice(&encode_varlena_header(VARHDRSZ + value.len()));
-    dst.extend_from_slice(value.as_bytes());
-}
-
-pub(crate) fn append_text_display_bytes(dst: &mut Vec<u8>, value: impl fmt::Display) {
-    let start = dst.len();
-    dst.resize(start + VARHDRSZ, 0);
-    fmt::write(
-        &mut SliceBackedWriter {
-            bytes: dst,
-            start: start + VARHDRSZ,
-        },
-        format_args!("{value}"),
-    )
-    .expect("writing to Vec<u8> cannot fail");
-    let total_len = dst.len() - start;
-    dst[start..start + VARHDRSZ].copy_from_slice(&encode_varlena_header(total_len));
-}
-
 #[allow(dead_code)]
 pub(crate) fn encode_numeric_i64_bytes(value: i64) -> Vec<u8> {
     encode_numeric_i64_with_scale_bytes(value, 0)
@@ -95,23 +77,16 @@ pub(crate) fn encode_numeric_i64_with_dscale_2_bytes(value: i64) -> Vec<u8> {
 }
 
 pub(crate) fn encode_numeric_i64_with_scale_bytes(value: i64, dscale: u16) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    append_numeric_i64_with_scale_bytes(&mut bytes, value, dscale);
-    bytes
-}
-
-pub(crate) fn append_numeric_i64_with_scale_bytes(dst: &mut Vec<u8>, value: i64, dscale: u16) {
     let sign = if value < 0 { NUMERIC_NEG } else { NUMERIC_POS };
     let (mut digits, mut weight) = scaled_base_10000_digits(value.unsigned_abs(), dscale);
     trim_leading_numeric_zeroes(&mut digits, &mut weight);
     trim_trailing_numeric_zeroes(&mut digits);
-    append_numeric_bytes(
-        dst,
+    encode_numeric_bytes(
         sign,
         dscale,
         if digits.is_empty() { 0 } else { weight },
         &digits,
-    );
+    )
 }
 
 unsafe fn varlena_datum_from_bytes(bytes: &[u8]) -> pg_sys::Datum {
@@ -126,22 +101,6 @@ struct TextVarlenaWriter {
 
 impl fmt::Write for TextVarlenaWriter {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        self.bytes.extend_from_slice(s.as_bytes());
-        Ok(())
-    }
-}
-
-struct SliceBackedWriter<'a> {
-    bytes: &'a mut Vec<u8>,
-    start: usize,
-}
-
-impl fmt::Write for SliceBackedWriter<'_> {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        debug_assert_eq!(
-            self.start + (self.bytes.len() - self.start),
-            self.bytes.len()
-        );
         self.bytes.extend_from_slice(s.as_bytes());
         Ok(())
     }
@@ -224,12 +183,14 @@ fn trim_trailing_numeric_zeroes(digits: &mut Vec<i16>) {
     }
 }
 
-fn append_numeric_bytes(dst: &mut Vec<u8>, sign: u16, dscale: u16, weight: i16, digits: &[i16]) {
+fn encode_numeric_bytes(sign: u16, dscale: u16, weight: i16, digits: &[i16]) -> Vec<u8> {
     let can_be_short = dscale <= NUMERIC_SHORT_DSCALE_MAX
         && (NUMERIC_SHORT_WEIGHT_MIN..=NUMERIC_SHORT_WEIGHT_MAX).contains(&weight);
     let header_size = if can_be_short { 2 } else { 4 };
     let total_len = VARHDRSZ + header_size + digits.len() * std::mem::size_of::<i16>();
-    dst.extend_from_slice(&encode_varlena_header(total_len));
+
+    let mut bytes = Vec::with_capacity(total_len);
+    bytes.extend_from_slice(&encode_varlena_header(total_len));
 
     if can_be_short {
         let short_header = (if sign == NUMERIC_NEG {
@@ -243,15 +204,17 @@ fn append_numeric_bytes(dst: &mut Vec<u8>, sign: u16, dscale: u16, weight: i16, 
                 0
             })
             | ((weight as u16) & NUMERIC_SHORT_WEIGHT_MASK);
-        dst.extend_from_slice(&short_header.to_ne_bytes());
+        bytes.extend_from_slice(&short_header.to_ne_bytes());
     } else {
-        dst.extend_from_slice(&(sign | (dscale & NUMERIC_DSCALE_MASK)).to_ne_bytes());
-        dst.extend_from_slice(&weight.to_ne_bytes());
+        bytes.extend_from_slice(&(sign | (dscale & NUMERIC_DSCALE_MASK)).to_ne_bytes());
+        bytes.extend_from_slice(&weight.to_ne_bytes());
     }
 
     for digit in digits {
-        dst.extend_from_slice(&digit.to_ne_bytes());
+        bytes.extend_from_slice(&digit.to_ne_bytes());
     }
+
+    bytes
 }
 
 fn encode_varlena_header(len: usize) -> [u8; 4] {
