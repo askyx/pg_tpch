@@ -1,6 +1,6 @@
 [package]
 name = "pg_tpch"
-version = "0.1.0"
+version = "1.0.0"
 authors = ["askyx"]
 edition = "2021"
 description = "A pgrx-based PostgreSQL extension for fast in-database TPC-H table creation, data loading, and query metadata."

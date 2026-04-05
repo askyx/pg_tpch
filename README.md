@@ -60,7 +60,7 @@ cd pg_tpch-pg16-ubuntu22.04-x86_64
 ```bash
 cp lib/pg_tpch.so "$(pg_config --pkglibdir)/"
 cp share/extension/pg_tpch.control "$(pg_config --sharedir)/extension/"
-cp share/extension/pg_tpch--0.1.0.sql "$(pg_config --sharedir)/extension/"
+cp share/extension/pg_tpch--1.0.0.sql "$(pg_config --sharedir)/extension/"
 ```
 
 ### 4. Install the extension in PostgreSQL
